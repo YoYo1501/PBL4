@@ -30,7 +30,12 @@ namespace NetworkAdminTool.Services
             return ScanNetworkAsync(subnet, timeoutMs, interfaceName, cancellationToken).GetAwaiter().GetResult();
         }
 
-        public async Task<List<NetworkDevice>> ScanNetworkAsync(string subnet, int timeoutMs = 300, string? interfaceName = null, CancellationToken cancellationToken = default)
+        public async Task<List<NetworkDevice>> ScanNetworkAsync(
+            string subnet,
+            int timeoutMs = 300,
+            string? interfaceName = null,
+            CancellationToken cancellationToken = default,
+            IProgress<NetworkScanProgress>? progress = null)
         {
             if (!TryGetHostRange(subnet, out var hostAddresses))
             {
@@ -47,7 +52,13 @@ namespace NetworkAdminTool.Services
             await ExecutePingPassAsync(ipsToScan, WarmUpTimeoutMs, WarmUpRetryCount, cancellationToken, collectResult: false);
 
             var effectiveTimeoutMs = Math.Max(timeoutMs, MinimumDiscoveryTimeoutMs);
-            var pingResults = await ExecutePingPassAsync(ipsToScan, effectiveTimeoutMs, DiscoveryRetryCount, cancellationToken, collectResult: true);
+            var pingResults = await ExecutePingPassAsync(
+                ipsToScan,
+                effectiveTimeoutMs,
+                DiscoveryRetryCount,
+                cancellationToken,
+                collectResult: true,
+                progress);
 
             var arpEntries = GetArpEntries();
             var onlineDevices = new List<NetworkDevice>();
@@ -119,10 +130,14 @@ namespace NetworkAdminTool.Services
             int timeoutMs,
             int retryCount,
             CancellationToken cancellationToken,
-            bool collectResult)
+            bool collectResult,
+            IProgress<NetworkScanProgress>? progress = null)
         {
             var results = new ConcurrentDictionary<string, PingResult>(StringComparer.OrdinalIgnoreCase);
             using var throttler = new SemaphoreSlim(MaxConcurrentPings);
+            var scanned = 0;
+            var online = 0;
+            var total = ips.Count;
 
             var tasks = ips.Select(async ip =>
             {
@@ -137,11 +152,28 @@ namespace NetworkAdminTool.Services
                         if (collectResult)
                         {
                             results[ip] = result;
+                            if (result.Success)
+                            {
+                                Interlocked.Increment(ref online);
+                            }
                         }
                     }
                     catch
                     {
                         // Ignore per-host ping failures to keep the scan resilient.
+                    }
+                    finally
+                    {
+                        if (collectResult && progress != null)
+                        {
+                            progress.Report(new NetworkScanProgress
+                            {
+                                ScannedHosts = Interlocked.Increment(ref scanned),
+                                TotalHosts = total,
+                                OnlineHosts = Volatile.Read(ref online),
+                                CurrentIpAddress = ip
+                            });
+                        }
                     }
                 }
                 finally

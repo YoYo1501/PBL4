@@ -9,5 +9,6 @@ namespace NetworkAdminTool.Models
         public string MacAddress { get; set; } = string.Empty;
         public bool IsOnline { get; set; }
         public long? ResponseTimeMs { get; set; }
+        public DateTime? LastSeen { get; set; }
     }
 }

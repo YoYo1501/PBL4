@@ -34,12 +34,30 @@ namespace NetworkAdminTool.Services
 
         public double GetDiskUsage()
         {
+            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
+            var systemDrive = DriveInfo.GetDrives()
+                .FirstOrDefault(d => d.IsReady && string.Equals(d.Name, systemRoot, StringComparison.OrdinalIgnoreCase));
+            if (systemDrive != null)
+            {
+                return CalculateDiskUsage(systemDrive);
+            }
+
             var drives = DriveInfo.GetDrives()
                 .Where(d => d.IsReady)
-                .Select(d => (double)(d.TotalSize == 0 ? 0 : (d.TotalSize - d.AvailableFreeSpace) / (double)d.TotalSize * 100))
+                .Select(CalculateDiskUsage)
                 .ToList();
 
             return drives.Count == 0 ? 0 : drives.Average();
+        }
+
+        private static double CalculateDiskUsage(DriveInfo drive)
+        {
+            if (drive.TotalSize <= 0)
+            {
+                return 0;
+            }
+
+            return (drive.TotalSize - drive.AvailableFreeSpace) / (double)drive.TotalSize * 100;
         }
 
         public List<SystemStats> GetHistory(int sampleCount = 10)

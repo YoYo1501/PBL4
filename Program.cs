@@ -33,11 +33,17 @@ namespace NetworkAdminTool
                     services.AddSingleton<INetworkScannerService, NetworkScannerService>();
                     services.AddSingleton<IPingService, PingService>();
                     services.AddSingleton<ISystemMonitorService, SystemMonitorService>();
+                    services.AddSingleton<NetworkDashboardState>();
 
                     services.AddTransient<MainForm>();
                     services.AddTransient<ScannerForm>();
                     services.AddTransient<PingForm>();
                     services.AddTransient<MonitorForm>();
+                    services.AddTransient<NetworkInfoForm>();
+                    services.AddTransient<AlertsForm>();
+                    services.AddTransient<LogsForm>();
+                    services.AddTransient<SettingsForm>();
+                    services.AddTransient<AboutForm>();
                 });
         }
     }

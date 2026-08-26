@@ -4,6 +4,7 @@ using System.Drawing.Drawing2D;
 using System.Net;
 using NetworkAdminTool.Interfaces;
 using NetworkAdminTool.Models;
+using NetworkAdminTool.Services;
 
 namespace NetworkAdminTool.Forms
 {
@@ -12,6 +13,7 @@ namespace NetworkAdminTool.Forms
         private readonly INetworkScannerService _scannerService;
         private readonly INetworkInfoService _networkInfoService;
         private readonly ILoggerService _logger;
+        private readonly NetworkDashboardState _dashboardState;
 
         private readonly ComboBox _cboSubnet;
         private readonly ComboBox _cboInterfaces;
@@ -22,6 +24,8 @@ namespace NetworkAdminTool.Forms
         private readonly Label _lblOfflineValue;
         private readonly Label _lblDurationValue;
         private readonly Label _lblResultTitle;
+        private readonly Label _lblProgressStatus;
+        private readonly ProgressBar _scanProgress;
         private Label _lblAdapterValue;
         private Label _lblIpValue;
         private Label _lblMaskValue;
@@ -35,8 +39,13 @@ namespace NetworkAdminTool.Forms
         private bool _isScanning;
         private List<NetworkDeviceRow> _allRows = new();
         private int _totalHosts;
+        private DateTime _lastProgressUiUpdateUtc = DateTime.MinValue;
+        private DeviceFilter _deviceFilter = DeviceFilter.All;
 
         private static readonly Color PageBack = Color.FromArgb(244, 248, 253);
+        private static readonly Color PanelBack = Color.White;
+        private static readonly Color PanelBack2 = Color.White;
+        private static readonly Color Border = Color.FromArgb(213, 224, 240);
         private static readonly Color Ink = Color.FromArgb(12, 28, 83);
         private static readonly Color Muted = Color.FromArgb(58, 72, 118);
         private static readonly Color Blue = Color.FromArgb(13, 101, 238);
@@ -47,16 +56,17 @@ namespace NetworkAdminTool.Forms
         private static Font UiFont(float pixels, FontStyle style = FontStyle.Regular, string family = "Segoe UI") =>
             new(family, pixels, style, GraphicsUnit.Pixel);
 
-        public ScannerForm(INetworkScannerService scannerService, INetworkInfoService networkInfoService, ILoggerService logger)
+        public ScannerForm(INetworkScannerService scannerService, INetworkInfoService networkInfoService, ILoggerService logger, NetworkDashboardState dashboardState)
         {
             _scannerService = scannerService;
             _networkInfoService = networkInfoService;
             _logger = logger;
+            _dashboardState = dashboardState;
 
             Text = "IP Scanner";
             StartPosition = FormStartPosition.CenterParent;
-            ClientSize = new Size(1600, 900);
-            MinimumSize = new Size(1180, 720);
+            ClientSize = new Size(1320, 780);
+            MinimumSize = new Size(1120, 720);
             MaximizeBox = true;
             BackColor = PageBack;
             AutoScaleMode = AutoScaleMode.None;
@@ -82,7 +92,7 @@ namespace NetworkAdminTool.Forms
                 ColumnCount = 2,
                 RowCount = 1
             };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230F));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260F));
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
 
             var leftPanel = BuildLeftInfoPanel();
@@ -91,9 +101,9 @@ namespace NetworkAdminTool.Forms
             var rightPanel = new RoundedPanel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.White,
-                BorderColor = Color.FromArgb(229, 234, 244),
-                Radius = 10,
+                BackColor = PanelBack,
+                BorderColor = Border,
+                Radius = 16,
                 Padding = new Padding(38, 26, 34, 32),
                 Margin = new Padding(9, 0, 0, 0)
             };
@@ -107,6 +117,8 @@ namespace NetworkAdminTool.Forms
             _lblScannedValue = new Label();
             _lblOnlineValue = new Label();
             _lblOfflineValue = new Label();
+            _lblProgressStatus = new Label();
+            _scanProgress = BuildProgressBar();
             _lblResultTitle = new Label
             {
                 Text = "Kết quả quét (0 thiết bị online)",
@@ -125,19 +137,21 @@ namespace NetworkAdminTool.Forms
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 ColumnCount = 1,
-                RowCount = 5
+                RowCount = 6
             };
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 84F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 140F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 88F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 108F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 136F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72F));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
             mainLayout.Controls.Add(BuildTitlePanel(), 0, 0);
             mainLayout.Controls.Add(BuildFilterPanel(), 0, 1);
-            mainLayout.Controls.Add(BuildCardsPanel(), 0, 2);
-            mainLayout.Controls.Add(BuildResultsHeader(), 0, 3);
-            mainLayout.Controls.Add(_gridResults, 0, 4);
+            mainLayout.Controls.Add(BuildProgressPanel(), 0, 2);
+            mainLayout.Controls.Add(BuildCardsPanel(), 0, 3);
+            mainLayout.Controls.Add(BuildResultsHeader(), 0, 4);
+            mainLayout.Controls.Add(_gridResults, 0, 5);
 
             rightPanel.Controls.Add(mainLayout);
             root.Controls.Add(leftPanel, 0, 0);
@@ -145,28 +159,63 @@ namespace NetworkAdminTool.Forms
             Controls.Add(root);
 
             LoadAvailableInterfaces();
-            ResetStats();
+            if (!LoadLastScanState())
+            {
+                ResetStats();
+            }
         }
 
         private Control BuildTitlePanel()
         {
-            var panel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
-            panel.Controls.Add(new Label
+            var panel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                ColumnCount = 2,
+                RowCount = 1
+            };
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68F));
+
+            var textPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                ColumnCount = 1,
+                RowCount = 2
+            };
+            textPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 58F));
+            textPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 42F));
+            textPanel.Controls.Add(new Label
             {
                 Text = "IP Scanner",
-                Font = UiFont(40F, FontStyle.Bold, "Segoe UI Semibold"),
+                Font = UiFont(38F, FontStyle.Bold, "Segoe UI Semibold"),
                 ForeColor = Ink,
-                AutoSize = true,
-                Location = new Point(0, 0)
-            });
-            panel.Controls.Add(new Label
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.BottomLeft
+            }, 0, 0);
+            textPanel.Controls.Add(new Label
             {
                 Text = "Thiết bị đang hoạt động trong LAN",
-                Font = UiFont(18F),
+                Font = UiFont(17F),
                 ForeColor = Muted,
-                AutoSize = true,
-                Location = new Point(1, 50)
-            });
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.TopLeft
+            }, 0, 1);
+
+            panel.Controls.Add(textPanel, 0, 0);
+            var assetIcon = TryLoadAssetImage("icon.png");
+            if (assetIcon != null)
+            {
+                panel.Controls.Add(new PictureBox
+                {
+                    Dock = DockStyle.Fill,
+                    Image = assetIcon,
+                    SizeMode = PictureBoxSizeMode.Zoom,
+                    Margin = new Padding(10, 4, 0, 12)
+                }, 1, 0);
+            }
+
             return panel;
         }
 
@@ -180,9 +229,9 @@ namespace NetworkAdminTool.Forms
                 RowCount = 1,
                 Padding = new Padding(0, 5, 0, 0)
             };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 390F));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 178F));
 
             layout.Controls.Add(BuildLabeledInput("Phạm vi mạng", _cboSubnet, new Padding(0, 0, 40, 0)), 0, 0);
             layout.Controls.Add(BuildLabeledInput("Giao diện mạng", _cboInterfaces, new Padding(0, 0, 54, 0)), 1, 0);
@@ -192,23 +241,52 @@ namespace NetworkAdminTool.Forms
 
         private Control BuildLabeledInput(string label, Control input, Padding margin)
         {
-            var panel = new Panel { Dock = DockStyle.Fill, Margin = margin, BackColor = Color.Transparent };
+            var panel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Margin = margin,
+                BackColor = Color.Transparent,
+                ColumnCount = 1,
+                RowCount = 2
+            };
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
+            panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             panel.Controls.Add(new Label
             {
                 Text = label,
-                Left = 0,
-                Top = 0,
-                Width = 260,
-                Height = 22,
                 ForeColor = Ink,
-                Font = UiFont(16F)
-            });
-            input.Left = 0;
-            input.Top = 30;
-            input.Width = panel.Width;
+                Font = UiFont(15F),
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft
+            }, 0, 0);
+            input.Dock = DockStyle.Top;
             input.Height = 44;
-            input.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-            panel.Controls.Add(input);
+            panel.Controls.Add(input, 0, 1);
+            return panel;
+        }
+
+        private Control BuildProgressPanel()
+        {
+            var panel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                ColumnCount = 1,
+                RowCount = 2,
+                Padding = new Padding(0, 0, 0, 8)
+            };
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 22F));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 14F));
+
+            _lblProgressStatus.Text = "Sẵn sàng quét";
+            _lblProgressStatus.Dock = DockStyle.Fill;
+            _lblProgressStatus.ForeColor = Muted;
+            _lblProgressStatus.Font = UiFont(15F);
+            _lblProgressStatus.TextAlign = ContentAlignment.MiddleLeft;
+            _scanProgress.Dock = DockStyle.Fill;
+
+            panel.Controls.Add(_lblProgressStatus, 0, 0);
+            panel.Controls.Add(_scanProgress, 0, 1);
             return panel;
         }
 
@@ -225,11 +303,33 @@ namespace NetworkAdminTool.Forms
             for (var i = 0; i < 4; i++)
                 cardsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
 
-            cardsPanel.Controls.Add(BuildStatCard("Đã quét", "địa chỉ", _lblScannedValue, Blue, "screen"), 0, 0);
-            cardsPanel.Controls.Add(BuildStatCard("Online", "thiết bị", _lblOnlineValue, Green, "dot"), 1, 0);
-            cardsPanel.Controls.Add(BuildStatCard("Offline", "thiết bị", _lblOfflineValue, Red, "wifi"), 2, 0);
+            var scannedCard = BuildStatCard("Đã quét", "địa chỉ", _lblScannedValue, Blue, "screen");
+            var onlineCard = BuildStatCard("Online", "thiết bị", _lblOnlineValue, Green, "dot");
+            var offlineCard = BuildStatCard("Offline", "đã từng kết nối", _lblOfflineValue, Red, "wifi");
+            MakeFilterCard(scannedCard, DeviceFilter.All);
+            MakeFilterCard(onlineCard, DeviceFilter.Online);
+            MakeFilterCard(offlineCard, DeviceFilter.Offline);
+
+            cardsPanel.Controls.Add(scannedCard, 0, 0);
+            cardsPanel.Controls.Add(onlineCard, 1, 0);
+            cardsPanel.Controls.Add(offlineCard, 2, 0);
             cardsPanel.Controls.Add(BuildStatCard("Thời gian quét", "", _lblDurationValue, Purple, "clock"), 3, 0);
             return cardsPanel;
+        }
+
+        private void MakeFilterCard(Control control, DeviceFilter filter)
+        {
+            control.Cursor = Cursors.Hand;
+            control.Click += (_, _) =>
+            {
+                _deviceFilter = filter;
+                ApplyFilter();
+            };
+
+            foreach (Control child in control.Controls)
+            {
+                MakeFilterCard(child, filter);
+            }
         }
 
         private Control BuildResultsHeader()
@@ -253,7 +353,13 @@ namespace NetworkAdminTool.Forms
                 BorderColor = Color.FromArgb(209, 218, 233),
                 Padding = new Padding(36, 10, 10, 0)
             };
-            searchWrap.Controls.Add(new SearchGlyph { Left = 12, Top = 12, Width = 18, Height = 18, ForeColor = Ink });
+            searchWrap.Controls.Add(new SearchGlyph
+            {
+                Dock = DockStyle.Left,
+                Width = 26,
+                ForeColor = Ink,
+                Margin = new Padding(0, 0, 8, 0)
+            });
             searchWrap.Controls.Add(_txtSearch);
 
             header.Controls.Add(_lblResultTitle, 0, 0);
@@ -278,9 +384,9 @@ namespace NetworkAdminTool.Forms
         {
             var button = new Button
             {
-                Text = "▶  Quét",
+                Text = "Quét",
                 Height = 48,
-                Dock = DockStyle.Bottom,
+                Dock = DockStyle.Fill,
                 Margin = new Padding(0, 0, 0, 20),
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Blue,
@@ -290,6 +396,17 @@ namespace NetworkAdminTool.Forms
             };
             button.FlatAppearance.BorderSize = 0;
             return button;
+        }
+
+        private static ProgressBar BuildProgressBar()
+        {
+            return new ProgressBar
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = 0,
+                Style = ProgressBarStyle.Continuous
+            };
         }
 
         private static TextBox BuildSearchBox()
@@ -311,77 +428,100 @@ namespace NetworkAdminTool.Forms
             var leftPanel = new RoundedPanel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.White,
-                BorderColor = Color.FromArgb(231, 236, 245),
-                Radius = 10,
+                BackColor = PanelBack,
+                BorderColor = Border,
+                Radius = 16,
                 Padding = new Padding(18, 18, 16, 16),
                 Margin = new Padding(0, 14, 0, 14)
             };
 
-            leftPanel.Controls.Add(new Label
+            var layout = new TableLayoutPanel
             {
-                Text = "●  Connected",
-                Font = UiFont(21F, FontStyle.Bold, "Segoe UI Semibold"),
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                ColumnCount = 1,
+                RowCount = 7
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+            for (var i = 0; i < 5; i++)
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72F));
+
+            layout.Controls.Add(new Label
+            {
+                Text = "Connected",
+                Font = UiFont(20F, FontStyle.Bold, "Segoe UI Semibold"),
                 ForeColor = Green,
-                AutoSize = true,
-                Location = new Point(20, 22)
-            });
-            leftPanel.Controls.Add(new Label
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft
+            }, 0, 0);
+            layout.Controls.Add(new Label
             {
                 Text = "Thông tin mạng",
-                Font = UiFont(21F, FontStyle.Bold, "Segoe UI Semibold"),
+                Font = UiFont(20F, FontStyle.Bold, "Segoe UI Semibold"),
                 ForeColor = Ink,
-                AutoSize = true,
-                Location = new Point(20, 62)
-            });
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.TopLeft
+            }, 0, 1);
+
+            leftPanel.Controls.Add(layout);
 
             return leftPanel;
         }
 
         private void AddLeftDetails(Control leftPanel)
         {
-            var y = 112;
-            AddLeftInfoRow(leftPanel, "Adapter", ref _lblAdapterValue, ref y, "screen");
-            AddLeftInfoRow(leftPanel, "IP Address", ref _lblIpValue, ref y, "dot");
-            AddLeftInfoRow(leftPanel, "Subnet Mask", ref _lblMaskValue, ref y, "nodes");
-            AddLeftInfoRow(leftPanel, "Gateway", ref _lblGatewayValue, ref y, "link");
-            AddLeftInfoRow(leftPanel, "MAC Address", ref _lblMacValue, ref y, "chip");
+            if (leftPanel.Controls[0] is not TableLayoutPanel layout)
+                return;
+
+            layout.Controls.Add(BuildLeftInfoRow("Adapter", ref _lblAdapterValue, "screen"), 0, 2);
+            layout.Controls.Add(BuildLeftInfoRow("IP Address", ref _lblIpValue, "dot"), 0, 3);
+            layout.Controls.Add(BuildLeftInfoRow("Subnet Mask", ref _lblMaskValue, "nodes"), 0, 4);
+            layout.Controls.Add(BuildLeftInfoRow("Gateway", ref _lblGatewayValue, "link"), 0, 5);
+            layout.Controls.Add(BuildLeftInfoRow("MAC Address", ref _lblMacValue, "chip"), 0, 6);
         }
 
-        private static void AddLeftInfoRow(Control parent, string title, ref Label valueLabel, ref int y, string icon)
+        private static Control BuildLeftInfoRow(string title, ref Label valueLabel, string icon)
         {
-            parent.Controls.Add(new SmallIconPanel
+            var row = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                ColumnCount = 2,
+                RowCount = 2,
+                Margin = new Padding(0, 0, 0, 8)
+            };
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44F));
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            row.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+            row.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            row.Controls.Add(new SmallIconPanel
             {
                 IconName = icon,
-                Left = 19,
-                Top = y,
-                Width = 30,
-                Height = 30,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 4, 10, 18),
                 BackColor = Color.FromArgb(221, 234, 255),
                 ForeColor = Blue
-            });
-            parent.Controls.Add(new Label
+            }, 0, 0);
+            row.SetRowSpan(row.Controls[0], 2);
+            row.Controls.Add(new Label
             {
                 Text = title,
-                Left = 62,
-                Top = y - 1,
-                Width = 128,
-                Height = 22,
                 ForeColor = Ink,
-                Font = UiFont(15F)
-            });
+                Font = UiFont(15F),
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft
+            }, 1, 0);
             valueLabel = new Label
             {
                 Text = "-",
-                Left = 62,
-                Top = y + 22,
-                Width = 146,
-                Height = 48,
                 ForeColor = Ink,
-                Font = UiFont(15F, FontStyle.Bold, "Segoe UI Semibold")
+                Font = UiFont(15F, FontStyle.Bold, "Segoe UI Semibold"),
+                Dock = DockStyle.Fill,
+                AutoEllipsis = true
             };
-            parent.Controls.Add(valueLabel);
-            y += 72;
+            row.Controls.Add(valueLabel, 1, 1);
+            return row;
         }
 
         private static RoundedPanel BuildStatCard(string title, string subtitle, Label valueLabel, Color accent, string icon)
@@ -390,51 +530,61 @@ namespace NetworkAdminTool.Forms
             {
                 Dock = DockStyle.Fill,
                 Margin = new Padding(0, 10, 22, 14),
-                BackColor = Color.White,
+                BackColor = PanelBack2,
                 BorderColor = Color.FromArgb(170, accent),
-                Radius = 8
+                Radius = 13
             };
 
-            panel.Controls.Add(new StatIconPanel
+            var layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                ColumnCount = 2,
+                RowCount = 3,
+                Padding = new Padding(16, 14, 14, 10)
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            layout.Controls.Add(new StatIconPanel
             {
                 IconName = icon,
                 Accent = accent,
-                Left = 20,
-                Top = 22,
-                Width = 60,
-                Height = 60
-            });
-            panel.Controls.Add(new Label
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 14, 20)
+            }, 0, 0);
+            layout.SetRowSpan(layout.Controls[0], 3);
+            layout.Controls.Add(new Label
             {
                 Text = title,
-                Left = 104,
-                Top = 22,
-                AutoSize = true,
                 ForeColor = title == "Offline" ? accent : Muted,
-                Font = UiFont(18F)
-            });
+                Font = UiFont(18F),
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft
+            }, 1, 0);
 
             valueLabel.Text = "0";
-            valueLabel.Left = 104;
-            valueLabel.Top = 49;
-            valueLabel.AutoSize = true;
             valueLabel.ForeColor = Ink;
             valueLabel.Font = UiFont(34F, FontStyle.Bold, "Segoe UI Semibold");
-            panel.Controls.Add(valueLabel);
+            valueLabel.Dock = DockStyle.Fill;
+            valueLabel.AutoEllipsis = true;
+            layout.Controls.Add(valueLabel, 1, 1);
 
             if (!string.IsNullOrWhiteSpace(subtitle))
             {
-                panel.Controls.Add(new Label
+                layout.Controls.Add(new Label
                 {
                     Text = subtitle,
-                    Left = 104,
-                    Top = 90,
-                    AutoSize = true,
                     ForeColor = Muted,
-                    Font = UiFont(17F)
-                });
+                    Font = UiFont(17F),
+                    Dock = DockStyle.Fill,
+                    TextAlign = ContentAlignment.TopLeft
+                }, 1, 2);
             }
 
+            panel.Controls.Add(layout);
             return panel;
         }
 
@@ -459,19 +609,19 @@ namespace NetworkAdminTool.Forms
                 ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single
             };
 
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Blue;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(13, 101, 238);
             grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
-            grid.ColumnHeadersDefaultCellStyle.Font = UiFont(18F, FontStyle.Bold, "Segoe UI Semibold");
-            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Blue;
-            grid.ColumnHeadersHeight = 48;
+            grid.ColumnHeadersDefaultCellStyle.Font = UiFont(16F, FontStyle.Bold, "Segoe UI Semibold");
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Color.FromArgb(13, 101, 238);
+            grid.ColumnHeadersHeight = 44;
             grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
 
-            grid.DefaultCellStyle.Font = UiFont(17F);
+            grid.DefaultCellStyle.Font = UiFont(15F);
             grid.DefaultCellStyle.ForeColor = Color.FromArgb(29, 47, 100);
             grid.DefaultCellStyle.BackColor = Color.White;
             grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(235, 242, 255);
             grid.DefaultCellStyle.SelectionForeColor = Ink;
-            grid.RowTemplate.Height = 50;
+            grid.RowTemplate.Height = 42;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
 
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "IP Address", DataPropertyName = nameof(NetworkDeviceRow.IpAddress), FillWeight = 15 });
@@ -482,7 +632,7 @@ namespace NetworkAdminTool.Forms
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Nhà cung cấp", DataPropertyName = nameof(NetworkDeviceRow.Vendor), FillWeight = 20 });
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Lần thấy cuối", DataPropertyName = nameof(NetworkDeviceRow.LastSeen), FillWeight = 17 });
 
-            grid.Columns[0].DefaultCellStyle.Font = UiFont(17F, FontStyle.Bold, "Segoe UI Semibold");
+            grid.Columns[0].DefaultCellStyle.Font = UiFont(15F, FontStyle.Bold, "Segoe UI Semibold");
             grid.Columns[4].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
             grid.CellPainting += Grid_CellPainting;
             return grid;
@@ -564,14 +714,18 @@ namespace NetworkAdminTool.Forms
             }
 
             var subnet = ToCidrText(_cboSubnet.Text.Trim());
-            if (string.IsNullOrWhiteSpace(subnet))
+            if (!TryValidateScanSubnet(subnet, out var validationMessage))
             {
-                MessageBox.Show("Vui lòng nhập subnet hoặc CIDR, ví dụ: 192.168.1.0/24", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(validationMessage, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             _scanCts = new CancellationTokenSource();
             _isScanning = true;
+            _allRows = new List<NetworkDeviceRow>();
+            _totalHosts = CountHosts(subnet);
+            _lastProgressUiUpdateUtc = DateTime.MinValue;
+            SetScanProgress(0, _totalHosts, 0, string.Empty);
             _btnStartScan.Text = "Dừng";
             _scanStopwatch.Restart();
             _scanTimer.Start();
@@ -579,6 +733,18 @@ namespace NetworkAdminTool.Forms
             _lblResultTitle.Text = "Kết quả quét (đang quét...)";
 
             var selectedInterface = _cboInterfaces.SelectedItem as NetworkInterfaceInfo;
+            var progress = new Progress<NetworkScanProgress>(p =>
+            {
+                var now = DateTime.UtcNow;
+                if (p.ScannedHosts < p.TotalHosts && (now - _lastProgressUiUpdateUtc).TotalMilliseconds < 150)
+                    return;
+
+                _lastProgressUiUpdateUtc = now;
+                SetScanProgress(p.ScannedHosts, p.TotalHosts, p.OnlineHosts, p.CurrentIpAddress);
+                _lblScannedValue.Text = p.ScannedHosts.ToString();
+                _lblOnlineValue.Text = p.OnlineHosts.ToString();
+                _lblOfflineValue.Text = _dashboardState.GetLatestDevices().Count(device => !device.IsOnline).ToString();
+            });
 
             try
             {
@@ -586,18 +752,20 @@ namespace NetworkAdminTool.Forms
                     subnet,
                     800,
                     interfaceName: selectedInterface?.Name,
-                    cancellationToken: _scanCts.Token);
+                    cancellationToken: _scanCts.Token,
+                    progress: progress);
 
                 var scanAt = DateTime.Now;
-                _allRows = devices
+                _dashboardState.UpdateScanResult(subnet, devices, scanAt);
+                _allRows = _dashboardState.GetLatestDevices()
                     .Select(device => CreateDeviceRow(device, scanAt))
                     .OrderBy(row => GetIpValue(row.IpAddress))
                     .ToList();
 
-                _totalHosts = CountHosts(subnet);
                 ApplyFilter();
                 UpdateStats();
-                _logger.Log($"IP scanner completed: {subnet}, online={_allRows.Count}");
+                SetScanProgress(_totalHosts, _totalHosts, _allRows.Count(row => row.StatusText == "Online"), string.Empty);
+                _logger.Log($"IP scanner completed: {subnet}, online={_allRows.Count(row => row.StatusText == "Online")}, known={_allRows.Count}");
             }
             catch (OperationCanceledException)
             {
@@ -614,38 +782,76 @@ namespace NetworkAdminTool.Forms
                 _scanStopwatch.Stop();
                 _scanTimer.Stop();
                 _lblDurationValue.Text = _scanStopwatch.Elapsed.ToString(@"hh\:mm\:ss");
-                _btnStartScan.Text = "▶  Quét";
+                _btnStartScan.Text = "Quét";
                 _scanCts?.Dispose();
                 _scanCts = null;
                 _isScanning = false;
+                _lblProgressStatus.Text = _scanProgress.Value >= _scanProgress.Maximum
+                    ? $"Hoàn tất: {_allRows.Count(row => row.StatusText == "Online")} online, {_allRows.Count(row => row.StatusText == "Offline")} offline trong {_scanStopwatch.Elapsed:mm\\:ss}"
+                    : "Sẵn sàng quét";
             }
         }
 
         private void ApplyFilter()
         {
             var keyword = _txtSearch.Text.Trim();
-            var rows = string.IsNullOrWhiteSpace(keyword)
-                ? _allRows
-                : _allRows.Where(row =>
+            var rows = _allRows.AsEnumerable();
+
+            rows = _deviceFilter switch
+            {
+                DeviceFilter.Online => rows.Where(row => row.StatusText == "Online"),
+                DeviceFilter.Offline => rows.Where(row => row.StatusText == "Offline"),
+                _ => rows
+            };
+
+            if (!string.IsNullOrWhiteSpace(keyword))
+            {
+                rows = rows.Where(row =>
                     row.IpAddress.Contains(keyword, StringComparison.OrdinalIgnoreCase)
                     || row.Hostname.Contains(keyword, StringComparison.OrdinalIgnoreCase)
                     || row.MacAddress.Contains(keyword, StringComparison.OrdinalIgnoreCase)
-                    || row.Vendor.Contains(keyword, StringComparison.OrdinalIgnoreCase))
-                .ToList();
+                    || row.Vendor.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+            }
 
-            _gridResults.DataSource = rows;
-            _lblResultTitle.Text = $"Kết quả quét ({rows.Count} thiết bị online)";
+            var filteredRows = rows.ToList();
+
+            _gridResults.DataSource = filteredRows;
+            var suffix = _deviceFilter switch
+            {
+                DeviceFilter.Online => "online",
+                DeviceFilter.Offline => "offline đã từng kết nối",
+                _ => "thiết bị"
+            };
+            _lblResultTitle.Text = $"Kết quả quét ({filteredRows.Count} {suffix}, {_allRows.Count(row => row.StatusText == "Online")} online)";
         }
 
         private void UpdateStats()
         {
-            var online = _allRows.Count;
-            var scanned = _totalHosts > 0 ? _totalHosts : online;
-            var offline = Math.Max(0, scanned - online);
+            var online = _allRows.Count(row => row.StatusText == "Online");
+            var offline = _allRows.Count(row => row.StatusText == "Offline");
+            var scanned = _totalHosts > 0 ? _totalHosts : _allRows.Count;
 
             _lblScannedValue.Text = scanned.ToString();
             _lblOnlineValue.Text = online.ToString();
             _lblOfflineValue.Text = offline.ToString();
+        }
+
+        private bool LoadLastScanState()
+        {
+            if (!_dashboardState.HasScan)
+                return false;
+
+            _totalHosts = string.IsNullOrWhiteSpace(_dashboardState.LastSubnet) ? 0 : CountHosts(_dashboardState.LastSubnet);
+            _allRows = _dashboardState.GetLatestDevices()
+                .Select(device => CreateDeviceRow(device, _dashboardState.LastScanAt ?? DateTime.Now))
+                .OrderBy(row => GetIpValue(row.IpAddress))
+                .ToList();
+
+            ApplyFilter();
+            UpdateStats();
+            _lblDurationValue.Text = "00:00:00";
+            _lblProgressStatus.Text = $"Kết quả gần nhất: {_dashboardState.LastScanAt:HH:mm:ss}";
+            return true;
         }
 
         private void ResetStats()
@@ -654,6 +860,18 @@ namespace NetworkAdminTool.Forms
             _lblOnlineValue.Text = "0";
             _lblOfflineValue.Text = "0";
             _lblDurationValue.Text = "00:00:00";
+            SetScanProgress(0, 100, 0, string.Empty);
+        }
+
+        private void SetScanProgress(int scanned, int total, int online, string currentIp)
+        {
+            var maximum = Math.Max(1, Math.Min(total, int.MaxValue));
+            _scanProgress.Maximum = maximum;
+            _scanProgress.Value = Math.Max(0, Math.Min(scanned, maximum));
+
+            _lblProgressStatus.Text = _isScanning
+                ? $"Đang quét {scanned}/{total} địa chỉ - online: {online}{(string.IsNullOrWhiteSpace(currentIp) ? string.Empty : $" - {currentIp}")}"
+                : "Sẵn sàng quét";
         }
 
         private static bool TryGetMaskFromCidr(string cidr, out string subnetMask)
@@ -697,6 +915,31 @@ namespace NetworkAdminTool.Forms
             return $"{ToIpString(network)}/24";
         }
 
+        private static bool TryValidateScanSubnet(string subnet, out string message)
+        {
+            message = string.Empty;
+            if (string.IsNullOrWhiteSpace(subnet))
+            {
+                message = "Vui lòng nhập subnet hoặc CIDR, ví dụ: 192.168.1.0/24";
+                return false;
+            }
+
+            if (!TryParseCidr(subnet, out _, out var prefix) || prefix is < 1 or > 30)
+            {
+                message = "Subnet không hợp lệ. Hãy nhập dạng CIDR như 192.168.1.0/24 hoặc dải 192.168.1.1 - 192.168.1.254.";
+                return false;
+            }
+
+            var hostCount = CountHosts(subnet);
+            if (hostCount > 65_534)
+            {
+                message = "Dải quét quá lớn. Vui lòng dùng /16 hoặc nhỏ hơn để tránh quét quá lâu.";
+                return false;
+            }
+
+            return true;
+        }
+
         private static bool TryParseCidr(string cidr, out uint network, out int prefix)
         {
             network = 0;
@@ -713,7 +956,7 @@ namespace NetworkAdminTool.Forms
         {
             var parts = subnet.Split('/', StringSplitOptions.TrimEntries);
             if (parts.Length == 2 && int.TryParse(parts[1], out var prefix) && prefix >= 1 && prefix <= 30)
-                return (1 << (32 - prefix)) - 2;
+                return (int)Math.Min(int.MaxValue, (1L << (32 - prefix)) - 2);
 
             return 254;
         }
@@ -723,26 +966,13 @@ namespace NetworkAdminTool.Forms
             return new NetworkDeviceRow
             {
                 IpAddress = device.IpAddress,
-                Hostname = ResolveHostName(device.IpAddress),
+                Hostname = "-",
                 MacAddress = string.IsNullOrWhiteSpace(device.MacAddress) ? "-" : device.MacAddress,
                 StatusText = device.IsOnline ? "Online" : "Offline",
                 ResponseTimeText = device.ResponseTimeMs.HasValue ? device.ResponseTimeMs.Value.ToString() : "-",
                 Vendor = ResolveVendorByMac(device.MacAddress),
-                LastSeen = scanTime.ToString("HH:mm:ss")
+                LastSeen = (device.LastSeen ?? scanTime).ToString("HH:mm:ss")
             };
-        }
-
-        private static string ResolveHostName(string ipAddress)
-        {
-            try
-            {
-                var hostEntry = Dns.GetHostEntry(ipAddress);
-                return string.IsNullOrWhiteSpace(hostEntry.HostName) ? "-" : hostEntry.HostName;
-            }
-            catch
-            {
-                return "-";
-            }
         }
 
         private static string ResolveVendorByMac(string macAddress)
@@ -823,6 +1053,23 @@ namespace NetworkAdminTool.Forms
             return new IPAddress(bytes).ToString();
         }
 
+        private static Image? TryLoadAssetImage(string fileName)
+        {
+            try
+            {
+                var path = Path.Combine(AppContext.BaseDirectory, "Assets", fileName);
+                if (!File.Exists(path) || new FileInfo(path).Length == 0)
+                    return null;
+
+                using var source = Image.FromFile(path);
+                return new Bitmap(source);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             _scanCts?.Cancel();
@@ -841,6 +1088,13 @@ namespace NetworkAdminTool.Forms
             public string ResponseTimeText { get; init; } = "-";
             public string Vendor { get; init; } = "Unknown";
             public string LastSeen { get; init; } = "-";
+        }
+
+        private enum DeviceFilter
+        {
+            All,
+            Online,
+            Offline
         }
     }
 
