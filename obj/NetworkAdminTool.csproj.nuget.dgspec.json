@@ -1,23 +1,23 @@
 {
   "format": 1,
   "restore": {
-    "D:\\1.University\\Semester-5\\Sanh\\PBL4\\NetworkAdminTool\\NetworkAdminTool\\NetworkAdminTool.csproj": {}
+    "E:\\TryHard\\PBL4\\NetworkAdminTool.csproj": {}
   },
   "projects": {
-    "D:\\1.University\\Semester-5\\Sanh\\PBL4\\NetworkAdminTool\\NetworkAdminTool\\NetworkAdminTool.csproj": {
+    "E:\\TryHard\\PBL4\\NetworkAdminTool.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\1.University\\Semester-5\\Sanh\\PBL4\\NetworkAdminTool\\NetworkAdminTool\\NetworkAdminTool.csproj",
+        "projectUniqueName": "E:\\TryHard\\PBL4\\NetworkAdminTool.csproj",
         "projectName": "NetworkAdminTool",
-        "projectPath": "D:\\1.University\\Semester-5\\Sanh\\PBL4\\NetworkAdminTool\\NetworkAdminTool\\NetworkAdminTool.csproj",
-        "packagesPath": "C:\\Users\\BUI VAN SANH\\.nuget\\packages\\",
-        "outputPath": "D:\\1.University\\Semester-5\\Sanh\\PBL4\\NetworkAdminTool\\NetworkAdminTool\\obj\\",
+        "projectPath": "E:\\TryHard\\PBL4\\NetworkAdminTool.csproj",
+        "packagesPath": "C:\\Users\\PC_HP\\.nuget\\packages\\",
+        "outputPath": "E:\\TryHard\\PBL4\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
         ],
         "configFilePaths": [
-          "C:\\Users\\BUI VAN SANH\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Users\\PC_HP\\AppData\\Roaming\\NuGet\\NuGet.Config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
@@ -29,7 +29,8 @@
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
-          "net10.0-windows7.0": {
+          "net10.0-windows": {
+            "framework": "net10.0-windows7.0",
             "targetAlias": "net10.0-windows",
             "projectReferences": {}
           }
@@ -44,10 +45,11 @@
           "auditLevel": "low",
           "auditMode": "all"
         },
-        "SdkAnalysisLevel": "10.0.100"
+        "SdkAnalysisLevel": "10.0.400"
       },
       "frameworks": {
-        "net10.0-windows7.0": {
+        "net10.0-windows": {
+          "framework": "net10.0-windows7.0",
           "targetAlias": "net10.0-windows",
           "dependencies": {
             "Microsoft.Extensions.Hosting": {
@@ -74,7 +76,7 @@
               "privateAssets": "none"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.102/PortableRuntimeIdentifierGraph.json",
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.400/PortableRuntimeIdentifierGraph.json",
           "packagesToPrune": {
             "Microsoft.CSharp": "(,4.7.32767]",
             "Microsoft.VisualBasic": "(,10.4.32767]",

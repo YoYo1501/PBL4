@@ -1,6 +1,10 @@
 ﻿using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Net.NetworkInformation;
 using Microsoft.Extensions.DependencyInjection;
+using NetworkAdminTool.Interfaces;
+using NetworkAdminTool.Models;
+using NetworkAdminTool.Services;
 
 namespace NetworkAdminTool.Forms
 {
@@ -63,8 +67,16 @@ namespace NetworkAdminTool.Forms
         private const int SidebarWidth = 280;
 
         private readonly IServiceProvider _services;
+        private readonly INetworkInfoService? _networkInfoService;
+        private readonly ISystemMonitorService? _monitorService;
+        private readonly NetworkDashboardState? _dashboardState;
+        private readonly Queue<float> _downloadMbpsHistory = new();
+        private readonly Queue<float> _uploadMbpsHistory = new();
         private readonly List<HitArea> _hits = new();
-        private int _hover = -1;
+        private long? _lastBytesReceived;
+        private long? _lastBytesSent;
+        private DateTime _lastTrafficSampleUtc = DateTime.MinValue;
+        private string? _hoverKey;
 
         public event MouseEventHandler? DragTitle;
         public event MouseEventHandler? MoveTitle;
@@ -76,6 +88,9 @@ namespace NetworkAdminTool.Forms
         public DashboardCanvas(IServiceProvider services)
         {
             _services = services;
+            _networkInfoService = services.GetService<INetworkInfoService>();
+            _monitorService = services.GetService<ISystemMonitorService>();
+            _dashboardState = services.GetService<NetworkDashboardState>();
             DoubleBuffered = true;
             ResizeRedraw = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
@@ -100,13 +115,14 @@ namespace NetworkAdminTool.Forms
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            var hover = _hits.FindIndex(h => h.Bounds.Contains(e.Location));
-            if (hover != _hover)
+            var hit = _hits.FirstOrDefault(h => h.Bounds.Contains(e.Location));
+            var hoverKey = hit.Bounds == Rectangle.Empty ? null : hit.Key;
+            if (!string.Equals(hoverKey, _hoverKey, StringComparison.Ordinal))
             {
-                _hover = hover;
+                _hoverKey = hoverKey;
                 Invalidate();
             }
-            Cursor = hover >= 0 ? Cursors.Hand : Cursors.Default;
+            Cursor = hit.Action != null ? Cursors.Hand : Cursors.Default;
             if (e.Y <= TitleHeight && e.X < Width - 190)
                 MoveTitle?.Invoke(this, e);
             base.OnMouseMove(e);
@@ -146,9 +162,9 @@ namespace NetworkAdminTool.Forms
             var min = new Rectangle(Width - 182, 10, 38, 28);
             var max = new Rectangle(Width - 118, 10, 38, 28);
             var close = new Rectangle(Width - 54, 10, 38, 28);
-            Hit(min, () => Minimize?.Invoke(this, EventArgs.Empty));
-            Hit(max, () => Maximize?.Invoke(this, EventArgs.Empty));
-            Hit(close, () => CloseApp?.Invoke(this, EventArgs.Empty));
+            Hit(min, () => Minimize?.Invoke(this, EventArgs.Empty), "minimize");
+            Hit(max, () => Maximize?.Invoke(this, EventArgs.Empty), "maximize");
+            Hit(close, () => CloseApp?.Invoke(this, EventArgs.Empty), "close");
             using var pen = new Pen(C(224, 230, 241), 1.6f);
             g.DrawLine(pen, min.X + 13, min.Y + 14, min.X + 25, min.Y + 14);
             g.DrawRectangle(pen, max.X + 13, max.Y + 8, 12, 12);
@@ -165,8 +181,8 @@ namespace NetworkAdminTool.Forms
                 g.DrawRound(p, r, 16);
 
             DrawLogo(g, new Rectangle(95, 73, 90, 68));
-            DrawText(g, "NET ADMIN", 75, 141, 140, 32, 23f, FontStyle.Bold, Color.White);
-            DrawText(g, "v1.0.0", 120, 174, 70, 20, 10f, FontStyle.Regular, C(164, 177, 201));
+            DrawText(g, "NET ADMIN", 28, 143, 224, 31, 19f, FontStyle.Bold, Color.White, true);
+            DrawText(g, "v1.0.0", 100, 176, 80, 18, 9.5f, FontStyle.Regular, C(164, 177, 201), true);
 
             var items = new[]
             {
@@ -182,7 +198,7 @@ namespace NetworkAdminTool.Forms
                     using var b = new LinearGradientBrush(ir, C(72, 100, 231), C(62, 58, 174), LinearGradientMode.Horizontal);
                     g.FillRound(b, ir, 9);
                 }
-                else if (_hover == i)
+                else if (string.Equals(_hoverKey, item.Item1, StringComparison.Ordinal))
                 {
                     using var b = new SolidBrush(C(22, 47, 78));
                     g.FillRound(b, ir, 9);
@@ -191,10 +207,16 @@ namespace NetworkAdminTool.Forms
                 DrawText(g, item.Item1, ir.X + 45, ir.Y + 12, 145, 23, 12.5f, i == 0 ? FontStyle.Bold : FontStyle.Regular, Color.White);
                 if (item.Item1 == "Alerts")
                 {
-                    var badge = new Rectangle(ir.Right - 57, ir.Y + 12, 35, 25);
-                    using var b = new LinearGradientBrush(badge, C(150, 70, 247), C(102, 56, 219), LinearGradientMode.Horizontal);
-                    g.FillRound(b, badge, 13);
-                    DrawText(g, "2", badge.X, badge.Y + 2, badge.Width, 18, 10f, FontStyle.Bold, Color.White, true);
+                    var alertCount = _dashboardState?.GetUnreadAlertCount() ?? 0;
+                    if (alertCount > 0)
+                    {
+                        var badgeText = alertCount > 99 ? "99+" : alertCount.ToString(CultureInfo.InvariantCulture);
+                        var badgeWidth = alertCount > 9 ? 43 : 35;
+                        var badge = new Rectangle(ir.Right - 22 - badgeWidth, ir.Y + 12, badgeWidth, 25);
+                        using var b = new LinearGradientBrush(badge, C(150, 70, 247), C(102, 56, 219), LinearGradientMode.Horizontal);
+                        g.FillRound(b, badge, 13);
+                        DrawText(g, badgeText, badge.X, badge.Y + 2, badge.Width, 18, 10f, FontStyle.Bold, Color.White, true);
+                    }
                 }
 
                 Action? action = item.Item1 switch
@@ -202,9 +224,14 @@ namespace NetworkAdminTool.Forms
                     "IP Scanner" => () => _services.GetRequiredService<ScannerForm>().Show(),
                     "Ping Tool" => () => _services.GetRequiredService<PingForm>().Show(),
                     "Monitoring" => () => _services.GetRequiredService<MonitorForm>().Show(),
+                    "Network Info" => () => _services.GetRequiredService<NetworkInfoForm>().Show(),
+                    "Alerts" => () => _services.GetRequiredService<AlertsForm>().Show(),
+                    "Logs" => () => _services.GetRequiredService<LogsForm>().Show(),
+                    "Settings" => () => _services.GetRequiredService<SettingsForm>().Show(),
+                    "About" => () => _services.GetRequiredService<AboutForm>().Show(),
                     _ => null
                 };
-                Hit(ir, action);
+                Hit(ir, action, item.Item1);
             }
 
             DrawSystemCard(g, new Rectangle(23, Height - 332, 240, 297));
@@ -220,20 +247,29 @@ namespace NetworkAdminTool.Forms
 
             var x = main.X + 38;
             var y = main.Y + 30;
-            DrawText(g, "Xin ch\u00e0o, Administrator!", x, y, 460, 36, 24f, FontStyle.Bold, Color.White);
-            DrawText(g, "T\u1ed5ng quan t\u00ecnh tr\u1ea1ng m\u1ea1ng v\u00e0 h\u1ec7 th\u1ed1ng", x, y + 39, 420, 24, 15f, FontStyle.Regular, C(219, 226, 240));
+            DrawText(g, "Xin ch\u00e0o, Administrator!", x, y, 540, 38, 23f, FontStyle.Bold, Color.White);
+            DrawText(g, "T\u1ed5ng quan t\u00ecnh tr\u1ea1ng m\u1ea1ng v\u00e0 h\u1ec7 th\u1ed1ng", x, y + 42, 500, 24, 13.5f, FontStyle.Regular, C(219, 226, 240));
             DrawClock(g, new Rectangle(main.Right - 335, y + 2, 305, 70));
 
-            var gap = 16;
-            var cardW = Math.Max(165, (main.Width - 70 - gap * 4) / 5);
+            var gap = 14;
+            var cardW = Math.Max(178, (main.Width - 76 - gap * 4) / 5);
             var cardY = main.Y + 108;
+            var dashboardDevices = GetDashboardDevices();
+            var totalDevices = dashboardDevices.Length;
+            var onlineDevices = dashboardDevices.Count(device => device.Online);
+            var offlineDevices = totalDevices - onlineDevices;
+            var pingValues = dashboardDevices
+                .Where(device => device.Online && device.PingMs.HasValue)
+                .Select(device => device.PingMs!.Value)
+                .ToList();
+            var averagePingText = pingValues.Count == 0 ? "-" : $"{pingValues.Average():0.#} ms";
             var stats = new[]
             {
-                new Stat("T\u1ed5ng thi\u1ebft b\u1ecb", "24", "Thi\u1ebft b\u1ecb trong m\u1ea1ng", C(17,160,255), "monitor"),
-                new Stat("Online", "21", "87.5%", C(37,207,92), "shield"),
-                new Stat("Offline", "3", "12.5%", C(249,42,100), "shieldx"),
-                new Stat("Ping trung b\u00ecnh", "3.6 ms", "M\u1ea1ng \u1ed5n \u0111\u1ecbnh", C(132,50,252), "pulse"),
-                new Stat("Th\u1eddi gian ho\u1ea1t \u0111\u1ed9ng", "5h 32m 18s", "Uptime h\u1ec7 th\u1ed1ng", C(242,142,10), "clock")
+                new Stat("T\u1ed5ng thi\u1ebft b\u1ecb", totalDevices.ToString(), "Theo bảng gần đây", C(17,160,255), "monitor"),
+                new Stat("Online", onlineDevices.ToString(), PercentText(onlineDevices, totalDevices), C(37,207,92), "shield"),
+                new Stat("Offline", offlineDevices.ToString(), PercentText(offlineDevices, totalDevices), C(249,42,100), "shieldx"),
+                new Stat("Ping trung b\u00ecnh", averagePingText, "Theo thiết bị online", C(132,50,252), "pulse"),
+                new Stat("Th\u1eddi gian ho\u1ea1t \u0111\u1ed9ng", FormatUptime(TimeSpan.FromMilliseconds(Environment.TickCount64)), "Uptime hệ thống", C(242,142,10), "clock")
             };
             for (var i = 0; i < stats.Length; i++)
                 DrawStat(g, new Rectangle(x + i * (cardW + gap), cardY, cardW, 120), stats[i]);
@@ -247,7 +283,7 @@ namespace NetworkAdminTool.Forms
             var bottomY = topY + 318;
             var bottomH = main.Bottom - bottomY - 18;
             var tableW = (int)((main.Width - 76) * 0.60);
-            DrawTable(g, new Rectangle(x - 15, bottomY, tableW, bottomH));
+            DrawTable(g, new Rectangle(x - 15, bottomY, tableW, bottomH), dashboardDevices);
             DrawAlerts(g, new Rectangle(x - 15 + tableW + 18, bottomY, main.Width - 76 - tableW - 18, bottomH));
         }
 
@@ -263,8 +299,16 @@ namespace NetworkAdminTool.Forms
                 g.FillEllipse(dot, r.X + 17, r.Y + 49, 11, 11);
             DrawText(g, "Online", r.X + 35, r.Y + 45, 80, 24, 11f, FontStyle.Regular, C(42, 234, 104));
 
-            var labels = new[] { "Adapter", "IP Address", "Gateway", "Subnet Mask" };
-            var values = new[] { "Wi-Fi", "192.168.1.10", "192.168.1.1", "255.255.255.0" };
+            var adapter = _networkInfoService?.GetAvailableNetworkInterfaces().FirstOrDefault();
+            var localIp = adapter?.IpAddress ?? string.Empty;
+            var labels = new[] { "Adapter", "IP Address", "Gateway", "Subnet" };
+            var values = new[]
+            {
+                string.IsNullOrWhiteSpace(adapter?.Name) ? "-" : adapter!.Name,
+                string.IsNullOrWhiteSpace(localIp) ? "-" : localIp,
+                string.IsNullOrWhiteSpace(adapter?.Gateway) ? "-" : adapter!.Gateway,
+                string.IsNullOrWhiteSpace(localIp) ? "-" : _networkInfoService?.GetSubnetPrefix(localIp) ?? "-"
+            };
             var yy = r.Y + 82;
             for (var i = 0; i < labels.Length; i++)
             {
@@ -278,8 +322,8 @@ namespace NetworkAdminTool.Forms
         {
             DrawClockIcon(g, new Rectangle(r.X, r.Y + 10, 44, 44), C(184, 196, 224));
             var now = DateTime.Now;
-            DrawText(g, now.ToString("hh:mm:ss tt", CultureInfo.InvariantCulture), r.X + 58, r.Y + 3, 235, 31, 24f, FontStyle.Bold, Color.White);
-            DrawText(g, now.ToString("dd/MM/yyyy - dddd", new CultureInfo("vi-VN")), r.X + 60, r.Y + 41, 225, 24, 13f, FontStyle.Regular, C(212, 219, 234));
+            DrawText(g, now.ToString("hh:mm:ss tt", CultureInfo.InvariantCulture), r.X + 58, r.Y + 3, 235, 31, 22f, FontStyle.Bold, Color.White);
+            DrawText(g, now.ToString("dd/MM/yyyy - dddd", new CultureInfo("vi-VN")), r.X + 60, r.Y + 41, 225, 24, 11.5f, FontStyle.Regular, C(212, 219, 234));
         }
 
         private void DrawStat(Graphics g, Rectangle r, Stat s)
@@ -291,42 +335,56 @@ namespace NetworkAdminTool.Forms
             using (var p = new Pen(Color.FromArgb(120, s.Accent)))
                 g.DrawRound(p, r, 13);
 
-            var icon = new Rectangle(r.X + 22, r.Y + 22, 66, 66);
+            var icon = new Rectangle(r.X + 18, r.Y + 24, 58, 58);
             using (var glow = new PathGradientBrush(icon.RoundPath(18)) { CenterColor = Color.FromArgb(235, s.Accent), SurroundColors = new[] { Color.FromArgb(30, s.Accent) } })
                 g.FillRound(glow, icon, 18);
             DrawStatIcon(g, s.Icon, icon, Color.White);
-            DrawText(g, s.Title, r.X + 108, r.Y + 24, r.Width - 120, 23, 13f, FontStyle.Regular, C(226, 233, 246));
-            DrawText(g, s.Value, r.X + 108, r.Y + 50, r.Width - 115, 32, 28f, FontStyle.Bold, Color.White);
-            DrawText(g, s.Subtitle, r.X + 108, r.Y + 87, r.Width - 115, 23, 13f, FontStyle.Regular, C(210, 219, 236));
+            var textX = icon.Right + 18;
+            var textW = Math.Max(72, r.Right - textX - 14);
+            DrawText(g, s.Title, textX, r.Y + 24, textW, 22, 11.5f, FontStyle.Regular, C(226, 233, 246));
+            DrawText(g, s.Value, textX, r.Y + 49, textW, 34, 25f, FontStyle.Bold, Color.White);
+            DrawText(g, s.Subtitle, textX, r.Y + 86, textW, 22, 11.5f, FontStyle.Regular, C(210, 219, 236));
         }
 
         private void DrawChart(Graphics g, Rectangle r)
         {
             Panel(g, r, "L\u01afU L\u01af\u1ee2NG M\u1ea0NG");
+            UpdateNetworkTrafficSample();
+            var download = _downloadMbpsHistory.ToArray();
+            var upload = _uploadMbpsHistory.ToArray();
+            var currentDownload = download.Length == 0 ? 0 : download[^1];
+            var currentUpload = upload.Length == 0 ? 0 : upload[^1];
+
             var pill = new Rectangle(r.Right - 118, r.Y + 17, 98, 32);
             using (var b = new SolidBrush(C(22, 38, 62)))
                 g.FillRound(b, pill, 8);
             using (var p = new Pen(C(31, 62, 95)))
                 g.DrawRound(p, pill, 8);
-            DrawText(g, "1 ph\u00fat", pill.X + 12, pill.Y + 6, 60, 18, 13f, FontStyle.Regular, Color.White);
+            DrawText(g, "Thời gian thực", pill.X + 8, pill.Y + 6, 82, 18, 10.5f, FontStyle.Regular, Color.White);
 
-            Legend(g, r.X + 45, r.Y + 60, "Download (Mbps)", C(28, 164, 255));
-            Legend(g, r.X + 212, r.Y + 60, "Upload (Mbps)", C(38, 209, 84));
-            Plot(g, new Rectangle(r.X + 55, r.Y + 92, r.Width - 95, r.Height - 138));
+            Legend(g, r.X + 45, r.Y + 60, "Tải xuống (Mbps)", C(28, 164, 255));
+            Legend(g, r.X + 212, r.Y + 60, "Tải lên (Mbps)", C(38, 209, 84));
+            DrawText(g, $"Tải xuống {currentDownload:0.##}", r.X + 45, r.Y + 78, 160, 20, 10f, FontStyle.Regular, C(28, 164, 255));
+            DrawText(g, $"Tải lên {currentUpload:0.##}", r.X + 212, r.Y + 78, 145, 20, 10f, FontStyle.Regular, C(38, 209, 84));
+            Plot(g, new Rectangle(r.X + 55, r.Y + 106, r.Width - 95, r.Height - 152), download, upload);
         }
 
         private void DrawPerformance(Graphics g, Rectangle r)
         {
             Panel(g, r, "HI\u1ec6U SU\u1ea4T H\u1ec6 TH\u1ed0NG");
             var w = r.Width / 3;
-            Ring(g, new Rectangle(r.X + 28, r.Y + 63, 130, 130), 35, C(33, 176, 244), "CPU Usage", "Cores: 4", "3.20 GHz");
-            Ring(g, new Rectangle(r.X + w + 36, r.Y + 63, 130, 130), 62, C(34, 206, 85), "RAM Usage", "Used: 4.9 GB", "Total: 8.0 GB");
-            Ring(g, new Rectangle(r.X + w * 2 + 42, r.Y + 63, 130, 130), 48, C(135, 55, 244), "Disk Usage", "Used: 118 GB", "Total: 256 GB");
+            var stats = _monitorService?.GetSystemStats();
+            var cpu = ClampPercent(stats?.CpuUsagePercent ?? 0);
+            var ram = ClampPercent(stats?.RamUsagePercent ?? 0);
+            var disk = ClampPercent((float)(_monitorService?.GetDiskUsage() ?? 0));
+            Ring(g, new Rectangle(r.X + 28, r.Y + 63, 130, 130), cpu, C(33, 176, 244), "CPU Usage", "Thời gian thực", "PerformanceCounter");
+            Ring(g, new Rectangle(r.X + w + 36, r.Y + 63, 130, 130), ram, C(34, 206, 85), "RAM Usage", "Thời gian thực", "Physical memory");
+            Ring(g, new Rectangle(r.X + w * 2 + 42, r.Y + 63, 130, 130), disk, C(135, 55, 244), "Disk Usage", "Ổ đĩa hệ thống", "Dự phòng: trung bình");
         }
 
-        private void DrawTable(Graphics g, Rectangle r)
+        private void DrawTable(Graphics g, Rectangle r, DashboardDevice[] rows)
         {
-            Panel(g, r, "THI\u1ebeT B\u1eca TRONG M\u1ea0NG (24)");
+            Panel(g, r, $"THI\u1ebeT B\u1eca TRONG M\u1ea0NG ({rows.Length})");
             var search = new Rectangle(r.Right - 400, r.Y + 17, 250, 32);
             using (var b = new SolidBrush(C(12, 29, 51)))
                 g.FillRound(b, search, 8);
@@ -336,9 +394,10 @@ namespace NetworkAdminTool.Forms
             DrawText(g, "T\u00ecm IP, Hostname, MAC...", search.X + 32, search.Y + 7, 190, 17, 12f, FontStyle.Regular, C(144, 157, 184));
             DrawRefresh(g, new Rectangle(r.Right - 134, r.Y + 22, 24, 24), C(197, 210, 233));
             var scan = new Rectangle(r.Right - 95, r.Y + 17, 77, 32);
-            using (var b = new LinearGradientBrush(scan, C(78, 91, 217), C(59, 57, 166), LinearGradientMode.Horizontal))
+            using (var b = new LinearGradientBrush(scan, string.Equals(_hoverKey, "dashboard-scan", StringComparison.Ordinal) ? C(89, 112, 246) : C(78, 91, 217), C(59, 57, 166), LinearGradientMode.Horizontal))
                 g.FillRound(b, scan, 8);
             DrawText(g, "Qu\u00e9t l\u1ea1i", scan.X, scan.Y + 7, scan.Width, 18, 12f, FontStyle.Bold, Color.White, true);
+            Hit(scan, () => _services.GetRequiredService<ScannerForm>().Show(), "dashboard-scan");
 
             var col = new[] { 52, 175, 305, 460, 580, 660 };
             var head = new[] { "IP Address", "Hostname", "MAC Address", "Tr\u1ea1ng th\u00e1i", "Ping", "Last Seen" };
@@ -348,40 +407,60 @@ namespace NetworkAdminTool.Forms
             for (var i = 0; i < head.Length; i++)
                 DrawText(g, head[i], r.X + col[i], y + 13, 120, 18, 10.5f, FontStyle.Regular, C(213, 222, 238));
 
-            var rows = new[]
+            if (rows.Length == 0)
             {
-                ("router", "192.168.1.1", "Router", "00:1A:2B:3C:4D:5E", true, "1 ms", "10:30:45"),
-                ("pc", "192.168.1.5", "PC-01", "10:BF:48:11:22:33", true, "3 ms", "10:30:45"),
-                ("laptop", "192.168.1.10", "LAPTOP-ADMIN", "20:4E:7F:AA:BB:CC", true, "2 ms", "10:30:44"),
-                ("printer", "192.168.1.15", "PRINTER-01", "44:1E:33:AA:BB:DD", true, "5 ms", "10:30:43"),
-                ("phone", "192.168.1.20", "PHONE-01", "6C:3B:6B:11:22:44", false, "-", "10:29:10")
-            };
+                DrawText(g, "Chưa có kết quả quét. Bấm Quét lại để mở IP Scanner.", r.X + 28, y + 62, r.Width - 56, 26, 12f, FontStyle.Regular, C(183, 196, 217));
+                var viewDevicesEmpty = new Rectangle(r.X + 20, r.Bottom - 36, 205, 28);
+                DrawText(g, "Xem tất cả thiết bị ->", viewDevicesEmpty.X, viewDevicesEmpty.Y + 4, viewDevicesEmpty.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-devices", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
+                Hit(viewDevicesEmpty, () => _services.GetRequiredService<NetworkInfoForm>().Show(), "dashboard-devices");
+                return;
+            }
+
             y += 36;
-            foreach (var row in rows)
+            var maxVisibleRows = Math.Max(1, (r.Bottom - y - 48) / 39);
+            foreach (var row in rows.Take(maxVisibleRows))
             {
-                DeviceIcon(g, row.Item1, new Rectangle(r.X + 22, y + 11, 20, 20), C(230, 236, 246));
-                DrawText(g, row.Item2, r.X + col[0], y + 9, 112, 20, 10.5f, FontStyle.Regular, Color.White);
-                DrawText(g, row.Item3, r.X + col[1], y + 9, 130, 20, 10.5f, FontStyle.Regular, Color.White);
-                DrawText(g, row.Item4, r.X + col[2], y + 9, 150, 20, 10.5f, FontStyle.Regular, Color.White);
-                using var dot = new SolidBrush(row.Item5 ? C(25, 213, 83) : C(244, 50, 84));
+                DeviceIcon(g, row.Icon, new Rectangle(r.X + 22, y + 11, 20, 20), C(230, 236, 246));
+                DrawText(g, row.IpAddress, r.X + col[0], y + 9, 112, 20, 10.5f, FontStyle.Regular, Color.White);
+                DrawText(g, row.Hostname, r.X + col[1], y + 9, 130, 20, 10.5f, FontStyle.Regular, Color.White);
+                DrawText(g, row.MacAddress, r.X + col[2], y + 9, 150, 20, 10.5f, FontStyle.Regular, Color.White);
+                using var dot = new SolidBrush(row.Online ? C(25, 213, 83) : C(244, 50, 84));
                 g.FillEllipse(dot, r.X + col[3], y + 16, 10, 10);
-                DrawText(g, row.Item5 ? "Online" : "Offline", r.X + col[3] + 20, y + 9, 90, 20, 10.5f, FontStyle.Regular, row.Item5 ? C(38, 231, 104) : C(255, 62, 95));
-                DrawText(g, row.Item6, r.X + col[4], y + 9, 65, 20, 10.5f, FontStyle.Regular, Color.White);
-                DrawText(g, row.Item7, r.X + col[5], y + 9, 85, 20, 10.5f, FontStyle.Regular, Color.White);
+                DrawText(g, row.Online ? "Online" : "Offline", r.X + col[3] + 20, y + 9, 90, 20, 10.5f, FontStyle.Regular, row.Online ? C(38, 231, 104) : C(255, 62, 95));
+                DrawText(g, row.PingMs.HasValue ? $"{row.PingMs.Value} ms" : "-", r.X + col[4], y + 9, 65, 20, 10.5f, FontStyle.Regular, Color.White);
+                DrawText(g, row.LastSeen, r.X + col[5], y + 9, 85, 20, 10.5f, FontStyle.Regular, Color.White);
                 g.DrawLine(line, r.X + 20, y + 41, r.Right - 20, y + 41);
                 y += 39;
             }
-            DrawText(g, "Xem t\u1ea5t c\u1ea3 thi\u1ebft b\u1ecb ->", r.X + 20, r.Bottom - 31, 170, 20, 12f, FontStyle.Regular, C(85, 132, 255));
+            if (rows.Length > maxVisibleRows)
+            {
+                DrawText(g, $"+{rows.Length - maxVisibleRows} thiết bị khác", r.Right - 175, r.Bottom - 36, 145, 20, 10.5f, FontStyle.Regular, C(183, 196, 217), true);
+            }
+            var viewDevices = new Rectangle(r.X + 20, r.Bottom - 36, 205, 28);
+            DrawText(g, "Xem t\u1ea5t c\u1ea3 thi\u1ebft b\u1ecb ->", viewDevices.X, viewDevices.Y + 4, viewDevices.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-devices", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
+            Hit(viewDevices, () => _services.GetRequiredService<NetworkInfoForm>().Show(), "dashboard-devices");
         }
 
         private void DrawAlerts(Graphics g, Rectangle r)
         {
             Panel(g, r, "C\u1ea2NH B\u00c1O G\u1ea6N \u0110\u00c2Y");
-            DrawText(g, "Xem t\u1ea5t c\u1ea3 ->", r.Right - 118, r.Y + 20, 95, 20, 12f, FontStyle.Regular, C(85, 132, 255));
-            Alert(g, r.X + 24, r.Y + 67, C(255, 52, 92), true, "Thi\u1ebft b\u1ecb 192.168.1.20 m\u1ea5t k\u1ebft n\u1ed1i", "Device offline", "10:29:10");
-            Alert(g, r.X + 24, r.Y + 133, C(15, 170, 255), false, "Thi\u1ebft b\u1ecb 192.168.1.15 v\u1eeba online", "Device online", "10:28:45");
-            Alert(g, r.X + 24, r.Y + 199, C(255, 158, 24), true, "Ping \u0111\u1ebfn 192.168.1.25 th\u1ea5t b\u1ea1i", "Request timeout", "10:28:30");
-            Alert(g, r.X + 24, r.Y + 265, C(15, 170, 255), false, "B\u1eaft \u0111\u1ea7u qu\u00e9t m\u1ea1ng 192.168.1.0/24", "Scan completed", "10:27:15");
+            var viewAlerts = new Rectangle(r.Right - 138, r.Y + 16, 116, 28);
+            DrawText(g, "Xem t\u1ea5t c\u1ea3 ->", viewAlerts.X, viewAlerts.Y + 4, viewAlerts.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-alerts", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
+            Hit(viewAlerts, () => _services.GetRequiredService<AlertsForm>().Show(), "dashboard-alerts");
+            var alerts = (_dashboardState?.GetRecentAlerts(4) ?? Array.Empty<NetworkAlert>()).ToList();
+            if (alerts.Count == 0)
+            {
+                DrawText(g, "Chưa có cảnh báo. Hãy chạy IP Scanner để cập nhật trạng thái gần nhất.", r.X + 24, r.Y + 76, r.Width - 48, 24, 11.5f, FontStyle.Regular, C(183, 196, 217));
+                return;
+            }
+
+            var y = r.Y + 67;
+            foreach (var alert in alerts)
+            {
+                var warning = alert.Severity.Equals("Warning", StringComparison.OrdinalIgnoreCase);
+                Alert(g, r.X + 24, y, warning ? C(255, 52, 92) : C(15, 170, 255), warning, alert.Title, alert.Message, alert.CreatedAt.ToString("HH:mm:ss"));
+                y += 66;
+            }
         }
 
         private void Panel(Graphics g, Rectangle r, string title)
@@ -393,31 +472,48 @@ namespace NetworkAdminTool.Forms
             DrawText(g, title, r.X + 20, r.Y + 23, 300, 24, 12.5f, FontStyle.Bold, Color.White);
         }
 
-        private void Plot(Graphics g, Rectangle plot)
+        private void Plot(Graphics g, Rectangle plot, IReadOnlyList<float> download, IReadOnlyList<float> upload)
         {
             using var grid = new Pen(C(27, 60, 88)) { DashStyle = DashStyle.Dot };
             using var axis = new SolidBrush(C(213, 221, 235));
             using var font = new Font("Segoe UI", 17f, FontStyle.Regular, GraphicsUnit.Pixel);
+            var maxValue = Math.Max(1f, Math.Max(download.DefaultIfEmpty(0).Max(), upload.DefaultIfEmpty(0).Max()));
+            maxValue = (float)Math.Ceiling(maxValue * 1.2f);
+
             for (var i = 0; i <= 5; i++)
             {
                 var y = plot.Bottom - i * plot.Height / 5;
                 g.DrawLine(grid, plot.Left, y, plot.Right, y);
-                g.DrawString((i * 20).ToString(), font, axis, plot.Left - 32, y - 8);
+                g.DrawString($"{maxValue * i / 5:0.#}", font, axis, plot.Left - 45, y - 8);
             }
-            for (var i = 0; i <= 22; i++)
-                g.DrawLine(grid, plot.Left + i * plot.Width / 22, plot.Top, plot.Left + i * plot.Width / 22, plot.Bottom);
+            for (var i = 0; i <= 12; i++)
+                g.DrawLine(grid, plot.Left + i * plot.Width / 12, plot.Top, plot.Left + i * plot.Width / 12, plot.Bottom);
 
-            AreaLine(g, plot, new float[] { 64, 75, 68, 59, 49, 53, 60, 70, 80, 67, 68, 55, 46, 65, 79, 69, 69, 55, 63, 70, 75, 60, 54, 68, 70, 83 }, C(28, 164, 255));
-            AreaLine(g, plot, new float[] { 20, 27, 37, 31, 23, 26, 31, 28, 36, 42, 35, 27, 26, 31, 37, 33, 36, 31, 20, 25, 37, 26, 23, 26, 27, 31 }, C(38, 209, 84));
+            if (download.Count < 2 && upload.Count < 2)
+            {
+                DrawText(g, "Đang lấy mẫu lưu lượng...", plot.Left + 20, plot.Top + plot.Height / 2 - 12, plot.Width - 40, 24, 11f, FontStyle.Regular, C(183, 196, 217), true);
+            }
+            else
+            {
+                AreaLine(g, plot, download, maxValue, C(28, 164, 255));
+                AreaLine(g, plot, upload, maxValue, C(38, 209, 84));
+            }
 
-            var times = new[] { "10:24", "10:25", "10:26", "10:27", "10:28", "10:29", "10:30" };
-            for (var i = 0; i < times.Length; i++)
-                g.DrawString(times[i], font, axis, plot.Left + i * plot.Width / (times.Length - 1) - 17, plot.Bottom + 13);
+            g.DrawString("-60s", font, axis, plot.Left - 10, plot.Bottom + 13);
+            g.DrawString("Bây giờ", font, axis, plot.Right - 50, plot.Bottom + 13);
         }
 
-        private void AreaLine(Graphics g, Rectangle plot, float[] values, Color color)
+        private void AreaLine(Graphics g, Rectangle plot, IReadOnlyList<float> values, float maxValue, Color color)
         {
-            var pts = values.Select((v, i) => new PointF(plot.Left + i * plot.Width / (float)(values.Length - 1), plot.Bottom - v / 100f * plot.Height)).ToArray();
+            if (values.Count == 0)
+                return;
+
+            var chartValues = values.Count == 1 ? new[] { values[0], values[0] } : values.ToArray();
+            var pts = chartValues.Select((v, i) =>
+            {
+                var safeValue = Math.Max(0, Math.Min(v, maxValue));
+                return new PointF(plot.Left + i * plot.Width / (float)(chartValues.Length - 1), plot.Bottom - safeValue / maxValue * plot.Height);
+            }).ToArray();
             using var area = new GraphicsPath();
             area.AddLines(pts);
             area.AddLine(pts[^1].X, plot.Bottom, pts[0].X, plot.Bottom);
@@ -429,6 +525,63 @@ namespace NetworkAdminTool.Forms
             using var dot = new SolidBrush(color);
             foreach (var p in pts)
                 g.FillEllipse(dot, p.X - 4, p.Y - 4, 8, 8);
+        }
+
+        private void UpdateNetworkTrafficSample()
+        {
+            var now = DateTime.UtcNow;
+            if (_lastTrafficSampleUtc != DateTime.MinValue && (now - _lastTrafficSampleUtc).TotalMilliseconds < 900)
+                return;
+
+            try
+            {
+                long bytesReceived = 0;
+                long bytesSent = 0;
+                foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (networkInterface.OperationalStatus != OperationalStatus.Up ||
+                        networkInterface.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                    {
+                        continue;
+                    }
+
+                    var stats = networkInterface.GetIPv4Statistics();
+                    bytesReceived += stats.BytesReceived;
+                    bytesSent += stats.BytesSent;
+                }
+
+                if (_lastBytesReceived.HasValue && _lastBytesSent.HasValue)
+                {
+                    var seconds = Math.Max(0.001, (now - _lastTrafficSampleUtc).TotalSeconds);
+                    var downloadMbps = (float)Math.Max(0, (bytesReceived - _lastBytesReceived.Value) * 8d / seconds / 1_000_000d);
+                    var uploadMbps = (float)Math.Max(0, (bytesSent - _lastBytesSent.Value) * 8d / seconds / 1_000_000d);
+                    EnqueueTrafficSample(downloadMbps, uploadMbps);
+                }
+                else
+                {
+                    EnqueueTrafficSample(0, 0);
+                }
+
+                _lastBytesReceived = bytesReceived;
+                _lastBytesSent = bytesSent;
+                _lastTrafficSampleUtc = now;
+            }
+            catch
+            {
+                EnqueueTrafficSample(0, 0);
+                _lastTrafficSampleUtc = now;
+            }
+        }
+
+        private void EnqueueTrafficSample(float downloadMbps, float uploadMbps)
+        {
+            _downloadMbpsHistory.Enqueue(downloadMbps);
+            _uploadMbpsHistory.Enqueue(uploadMbps);
+
+            while (_downloadMbpsHistory.Count > 60)
+                _downloadMbpsHistory.Dequeue();
+            while (_uploadMbpsHistory.Count > 60)
+                _uploadMbpsHistory.Dequeue();
         }
 
         private void Ring(Graphics g, Rectangle r, int value, Color color, string title, string sub1, string sub2)
@@ -456,7 +609,7 @@ namespace NetworkAdminTool.Forms
                 g.DrawEllipse(pen, x + 2, y + 4, 31, 31);
                 DrawText(g, "i", x + 2, y + 8, 31, 20, 15f, FontStyle.Bold, color, true);
             }
-            DrawText(g, title, x + 57, y + 1, 315, 23, 11.5f, FontStyle.Regular, Color.White);
+            DrawText(g, title, x + 57, y + 1, 315, 23, 10.5f, FontStyle.Regular, Color.White);
             DrawText(g, sub, x + 57, y + 27, 180, 20, 10.5f, FontStyle.Regular, C(183, 196, 217));
             DrawText(g, time, x + 390, y + 2, 70, 20, 10f, FontStyle.Regular, C(151, 166, 193));
             using var line = new Pen(C(26, 54, 82));
@@ -470,10 +623,60 @@ namespace NetworkAdminTool.Forms
             DrawText(g, text, x + 30, y - 1, 140, 20, 9.5f, FontStyle.Regular, Color.White);
         }
 
+        private DashboardDevice[] GetDashboardDevices()
+        {
+            if (_dashboardState?.HasScan == true)
+            {
+                return _dashboardState.GetLatestDevices()
+                    .Select(device => new DashboardDevice(
+                        GuessDeviceIcon(device),
+                        device.IpAddress,
+                        "-",
+                        string.IsNullOrWhiteSpace(device.MacAddress) ? "-" : device.MacAddress,
+                        device.IsOnline,
+                        device.ResponseTimeMs,
+                        device.LastSeen?.ToString("HH:mm:ss") ?? "-"))
+                    .ToArray();
+            }
+
+            return Array.Empty<DashboardDevice>();
+        }
+
+        private static string GuessDeviceIcon(NetworkDevice device)
+        {
+            if (device.IpAddress.EndsWith(".1", StringComparison.Ordinal))
+                return "router";
+
+            return "pc";
+        }
+
+        private static string PercentText(int value, int total)
+        {
+            if (total <= 0)
+                return "0%";
+
+            return $"{value * 100.0 / total:0.#}%";
+        }
+
+        private static int ClampPercent(float value)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+                return 0;
+
+            return Math.Max(0, Math.Min(100, (int)Math.Round(value)));
+        }
+
+        private static string FormatUptime(TimeSpan uptime)
+        {
+            if (uptime.TotalDays >= 1)
+                return $"{(int)uptime.TotalDays} ngày {uptime.Hours} giờ";
+
+            return $"{uptime.Hours} giờ {uptime.Minutes} phút";
+        }
+
         private void DrawText(Graphics g, string text, int x, int y, int w, int h, float size, FontStyle style, Color color, bool center = false)
         {
-            const float textScale = 1.45f;
-            using var font = new Font("Segoe UI", size * textScale, style, GraphicsUnit.Pixel);
+            const float textScale = 1.25f;
             using var brush = new SolidBrush(color);
             using var format = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             if (center)
@@ -481,15 +684,33 @@ namespace NetworkAdminTool.Forms
                 format.Alignment = StringAlignment.Center;
                 format.LineAlignment = StringAlignment.Center;
             }
-            var drawHeight = Math.Max(h, font.Height + 6);
-            g.DrawString(text, font, brush, new RectangleF(x, y - 2, w, drawHeight), format);
+            using var font = FitFont(g, text, size * textScale, style, Math.Max(1, w), Math.Max(1, h), format);
+            g.DrawString(text, font, brush, new RectangleF(x, y, Math.Max(1, w), Math.Max(1, h)), format);
         }
 
-        private void Hit(Rectangle r, Action? action) => _hits.Add(new HitArea(r, action));
+        private static Font FitFont(Graphics g, string text, float preferredPixels, FontStyle style, int width, int height, StringFormat format)
+        {
+            var current = preferredPixels;
+            while (current > 8f)
+            {
+                var font = new Font("Segoe UI", current, style, GraphicsUnit.Pixel);
+                var measured = g.MeasureString(text, font, width, format);
+                if (measured.Width <= width + 1 && measured.Height <= height + 2)
+                    return font;
+
+                font.Dispose();
+                current -= 1f;
+            }
+
+            return new Font("Segoe UI", 8f, style, GraphicsUnit.Pixel);
+        }
+
+        private void Hit(Rectangle r, Action? action, string key) => _hits.Add(new HitArea(r, action, key));
         private static Color C(int r, int g, int b) => Color.FromArgb(r, g, b);
 
         private readonly record struct Stat(string Title, string Value, string Subtitle, Color Accent, string Icon);
-        private readonly record struct HitArea(Rectangle Bounds, Action? Action);
+        private readonly record struct HitArea(Rectangle Bounds, Action? Action, string Key);
+        private readonly record struct DashboardDevice(string Icon, string IpAddress, string Hostname, string MacAddress, bool Online, long? PingMs, string LastSeen);
 
         private static void DrawLogo(Graphics g, Rectangle r)
         {
