@@ -3,7 +3,7 @@ using NetworkAdminTool.Interfaces;
 namespace NetworkAdminTool.Forms
 {
     /// <summary>
-    /// Form giám sát CPU/RAM theo thời gian thực. Chỉ lo hiển thị,
+    /// Form giám sát CPU/RAM/Disk theo thời gian thực. Chỉ lo hiển thị,
     /// logic thật nằm ở SystemMonitorService.
     /// </summary>
     public class MonitorForm : Form
@@ -15,22 +15,26 @@ namespace NetworkAdminTool.Forms
         private Label? lblCpuValue;
         private Label? lblRamTitle;
         private Label? lblRamValue;
+        private Label? lblDiskTitle;
+        private Label? lblDiskValue;
         private ProgressBar? prgCpu;
         private ProgressBar? prgRam;
+        private ProgressBar? prgDisk;
 
         public MonitorForm(ISystemMonitorService monitorService)
         {
             _monitorService = monitorService;
             Text = "Thông tin hệ thống";
             StartPosition = FormStartPosition.CenterParent;
-            ClientSize = new Size(520, 320);
-            MinimumSize = new Size(480, 280);
+            ClientSize = new Size(560, 430);
+            MinimumSize = new Size(500, 360);
             BackColor = Color.FromArgb(244, 248, 253);
             Font = new Font("Segoe UI", 10F);
 
             InitializeComponents();
             InitializeTimer();
 
+            Shown += (_, _) => UpdateMetrics();
             FormClosed += (s, e) => _timer?.Stop();
         }
 
@@ -42,15 +46,16 @@ namespace NetworkAdminTool.Forms
                 Padding = new Padding(24),
                 BackColor = Color.FromArgb(244, 248, 253),
                 ColumnCount = 1,
-                RowCount = 3
+                RowCount = 4
             };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 33.34F));
 
             root.Controls.Add(new Label
             {
-                Text = "System Monitor",
+                Text = "Giám sát hệ thống",
                 Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI Semibold", 22F, FontStyle.Bold),
                 ForeColor = Color.FromArgb(12, 28, 83),
@@ -63,9 +68,13 @@ namespace NetworkAdminTool.Forms
             lblRamTitle = new Label();
             lblRamValue = new Label();
             prgRam = new ProgressBar();
+            lblDiskTitle = new Label();
+            lblDiskValue = new Label();
+            prgDisk = new ProgressBar();
 
             root.Controls.Add(BuildMetricPanel("CPU Usage", lblCpuTitle, lblCpuValue, prgCpu), 0, 1);
             root.Controls.Add(BuildMetricPanel("RAM Usage", lblRamTitle, lblRamValue, prgRam), 0, 2);
+            root.Controls.Add(BuildMetricPanel("Disk Usage", lblDiskTitle, lblDiskValue, prgDisk), 0, 3);
             Controls.Add(root);
         }
 
@@ -111,21 +120,35 @@ namespace NetworkAdminTool.Forms
         }
 
         /// <summary>
-        /// Cập nhật CPU/RAM mỗi 1 giây bằng Timer — không dùng vòng lặp
+        /// Cập nhật CPU/RAM/Disk mỗi 1 giây bằng Timer — không dùng vòng lặp
         /// while thủ công, tránh treo giao diện.
         /// </summary>
         private void InitializeTimer()
         {
             _timer = new System.Windows.Forms.Timer { Interval = 1000 };
-            _timer.Tick += (s, e) =>
-            {
-                var stats = _monitorService.GetSystemStats();
-                lblCpuValue!.Text = $"{stats.CpuUsagePercent:0.0} %";
-                lblRamValue!.Text = $"{stats.RamUsagePercent:0.0} %";
-                prgCpu!.Value = Math.Max(0, Math.Min(100, (int)Math.Round(stats.CpuUsagePercent)));
-                prgRam!.Value = Math.Max(0, Math.Min(100, (int)Math.Round(stats.RamUsagePercent)));
-            };
+            _timer.Tick += (_, _) => UpdateMetrics();
             _timer.Start();
+        }
+
+        private void UpdateMetrics()
+        {
+            var stats = _monitorService.GetSystemStats();
+            var diskUsage = _monitorService.GetDiskUsage();
+
+            lblCpuValue!.Text = $"{stats.CpuUsagePercent:0.0} %";
+            lblRamValue!.Text = $"{stats.RamUsagePercent:0.0} %";
+            lblDiskValue!.Text = $"{diskUsage:0.0} %";
+            prgCpu!.Value = ToProgressValue(stats.CpuUsagePercent);
+            prgRam!.Value = ToProgressValue(stats.RamUsagePercent);
+            prgDisk!.Value = ToProgressValue(diskUsage);
+        }
+
+        private static int ToProgressValue(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return 0;
+
+            return Math.Max(0, Math.Min(100, (int)Math.Round(value)));
         }
     }
 }

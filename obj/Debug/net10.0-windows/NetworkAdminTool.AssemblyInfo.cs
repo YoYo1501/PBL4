@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NetworkAdminTool")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c98e9a9143a2bc28788e83ee55524418fa933c21")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ddadda2473e841dad2a4498436884c5ca6479744")]
 [assembly: System.Reflection.AssemblyProductAttribute("NetworkAdminTool")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NetworkAdminTool")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

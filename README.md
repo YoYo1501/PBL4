@@ -69,7 +69,14 @@ macOS/Linux).
 - Tối ưu IP Scanner để giảm lag khi quét: giới hạn tần suất cập nhật progress UI và bỏ DNS reverse lookup đồng bộ khỏi lúc render kết quả/Dashboard.
 - Dashboard phần `Thiết bị trong mạng` hiển thị cả thiết bị online và thiết bị offline đã từng kết nối từ `NetworkDashboardState`; bảng tự giới hạn số dòng theo chiều cao khung để không tràn giao diện.
 - `Cảnh báo gần đây` trên Dashboard và form `Alerts` đọc cùng lịch sử từ `NetworkDashboardState`: thiết bị mới online, thiết bị mất kết nối, thiết bị online trở lại và bản ghi hoàn tất quét đều cập nhật theo lần scan gần nhất.
+- Badge `Alerts` trên menu Dashboard không còn là số cố định; số badge lấy từ số cảnh báo mới chưa xem trong `NetworkDashboardState` và được đánh dấu đã xem khi mở form `Alerts`.
+- `Lưu lượng mạng` trên Dashboard đã chuyển từ dữ liệu mẫu sang lấy real-time từ các network interface đang hoạt động bằng `NetworkInterface.GetIPv4Statistics()`, tính Mbps download/upload theo delta byte mỗi giây và tự co trục biểu đồ theo dữ liệu thật.
+- `Ping trung bình` trên Dashboard lấy từ `ResponseTimeMs` của các thiết bị online trong lần quét gần nhất; nếu chưa có dữ liệu ping thì hiển thị `-`.
+- `Thời gian hoạt động` trên Dashboard lấy từ `Environment.TickCount64`, tức uptime hệ thống Windows hiện tại, không dùng số cố định.
 - `Disk Usage` ưu tiên tính theo ổ hệ thống Windows; nếu không lấy được ổ hệ thống thì fallback sang trung bình các ổ đĩa đang sẵn sàng.
+- `MonitorForm` đã bổ sung card `Disk Usage` chạy cùng timer CPU/RAM; `Network Info` reload lại danh sách adapter đang hoạt động khi form được mở/kích hoạt.
+- `CPU Usage` ở Dashboard và Monitoring dùng chung cache mẫu đo trong `SystemMonitorService`, tránh việc hai form gọi `PerformanceCounter.NextValue()` lệch nhịp và hiển thị khác nhau.
+- Rà soát các form `Ping`, `Network Info`, `Alerts`, `Logs`, `Settings`, `About` và chuyển các chuỗi tiếng Việt còn thiếu dấu sang có dấu.
 - Thêm cấu hình copy toàn bộ `/Assets` ra thư mục output. `ScannerForm` sẽ thử dùng `Assets/icon.png` nếu file ảnh hợp lệ; hiện tại file asset trong repo đang rỗng nên app bỏ qua an toàn để không phát sinh lỗi load ảnh.
 
 ## Việc cần phát triển tiếp
@@ -84,7 +91,7 @@ macOS/Linux).
 - Lưu lịch sử quét theo thời gian để so sánh thiết bị mới/mất kết nối.
 - Thêm tùy chọn timeout, retry count và số luồng quét trên giao diện.
 - Lưu `NetworkDashboardState` ra file/database nếu muốn giữ kết quả Dashboard sau khi tắt mở lại ứng dụng.
-- Thay biểu đồ lưu lượng mạng demo bằng dữ liệu thật từ interface mạng.
+- Cho phép chọn adapter cụ thể cho biểu đồ lưu lượng mạng thay vì cộng tất cả interface đang hoạt động.
 - Bổ sung test đơn vị cho parse CIDR/dải IP, đếm host và normalize MAC address.
 
 ## Cách test độc lập từng Service (khuyến nghị trước khi chạy UI)

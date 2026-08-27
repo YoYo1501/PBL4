@@ -1,5 +1,6 @@
 ﻿using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Net.NetworkInformation;
 using Microsoft.Extensions.DependencyInjection;
 using NetworkAdminTool.Interfaces;
 using NetworkAdminTool.Models;
@@ -69,7 +70,12 @@ namespace NetworkAdminTool.Forms
         private readonly INetworkInfoService? _networkInfoService;
         private readonly ISystemMonitorService? _monitorService;
         private readonly NetworkDashboardState? _dashboardState;
+        private readonly Queue<float> _downloadMbpsHistory = new();
+        private readonly Queue<float> _uploadMbpsHistory = new();
         private readonly List<HitArea> _hits = new();
+        private long? _lastBytesReceived;
+        private long? _lastBytesSent;
+        private DateTime _lastTrafficSampleUtc = DateTime.MinValue;
         private string? _hoverKey;
 
         public event MouseEventHandler? DragTitle;
@@ -201,10 +207,16 @@ namespace NetworkAdminTool.Forms
                 DrawText(g, item.Item1, ir.X + 45, ir.Y + 12, 145, 23, 12.5f, i == 0 ? FontStyle.Bold : FontStyle.Regular, Color.White);
                 if (item.Item1 == "Alerts")
                 {
-                    var badge = new Rectangle(ir.Right - 57, ir.Y + 12, 35, 25);
-                    using var b = new LinearGradientBrush(badge, C(150, 70, 247), C(102, 56, 219), LinearGradientMode.Horizontal);
-                    g.FillRound(b, badge, 13);
-                    DrawText(g, "2", badge.X, badge.Y + 2, badge.Width, 18, 10f, FontStyle.Bold, Color.White, true);
+                    var alertCount = _dashboardState?.GetUnreadAlertCount() ?? 0;
+                    if (alertCount > 0)
+                    {
+                        var badgeText = alertCount > 99 ? "99+" : alertCount.ToString(CultureInfo.InvariantCulture);
+                        var badgeWidth = alertCount > 9 ? 43 : 35;
+                        var badge = new Rectangle(ir.Right - 22 - badgeWidth, ir.Y + 12, badgeWidth, 25);
+                        using var b = new LinearGradientBrush(badge, C(150, 70, 247), C(102, 56, 219), LinearGradientMode.Horizontal);
+                        g.FillRound(b, badge, 13);
+                        DrawText(g, badgeText, badge.X, badge.Y + 2, badge.Width, 18, 10f, FontStyle.Bold, Color.White, true);
+                    }
                 }
 
                 Action? action = item.Item1 switch
@@ -253,11 +265,11 @@ namespace NetworkAdminTool.Forms
             var averagePingText = pingValues.Count == 0 ? "-" : $"{pingValues.Average():0.#} ms";
             var stats = new[]
             {
-                new Stat("T\u1ed5ng thi\u1ebft b\u1ecb", totalDevices.ToString(), "Theo bang gan day", C(17,160,255), "monitor"),
+                new Stat("T\u1ed5ng thi\u1ebft b\u1ecb", totalDevices.ToString(), "Theo bảng gần đây", C(17,160,255), "monitor"),
                 new Stat("Online", onlineDevices.ToString(), PercentText(onlineDevices, totalDevices), C(37,207,92), "shield"),
                 new Stat("Offline", offlineDevices.ToString(), PercentText(offlineDevices, totalDevices), C(249,42,100), "shieldx"),
-                new Stat("Ping trung b\u00ecnh", averagePingText, "Theo thiet bi online", C(132,50,252), "pulse"),
-                new Stat("Th\u1eddi gian ho\u1ea1t \u0111\u1ed9ng", FormatUptime(TimeSpan.FromMilliseconds(Environment.TickCount64)), "Uptime he thong", C(242,142,10), "clock")
+                new Stat("Ping trung b\u00ecnh", averagePingText, "Theo thiết bị online", C(132,50,252), "pulse"),
+                new Stat("Th\u1eddi gian ho\u1ea1t \u0111\u1ed9ng", FormatUptime(TimeSpan.FromMilliseconds(Environment.TickCount64)), "Uptime hệ thống", C(242,142,10), "clock")
             };
             for (var i = 0; i < stats.Length; i++)
                 DrawStat(g, new Rectangle(x + i * (cardW + gap), cardY, cardW, 120), stats[i]);
@@ -337,28 +349,37 @@ namespace NetworkAdminTool.Forms
         private void DrawChart(Graphics g, Rectangle r)
         {
             Panel(g, r, "L\u01afU L\u01af\u1ee2NG M\u1ea0NG");
+            UpdateNetworkTrafficSample();
+            var download = _downloadMbpsHistory.ToArray();
+            var upload = _uploadMbpsHistory.ToArray();
+            var currentDownload = download.Length == 0 ? 0 : download[^1];
+            var currentUpload = upload.Length == 0 ? 0 : upload[^1];
+
             var pill = new Rectangle(r.Right - 118, r.Y + 17, 98, 32);
             using (var b = new SolidBrush(C(22, 38, 62)))
                 g.FillRound(b, pill, 8);
             using (var p = new Pen(C(31, 62, 95)))
                 g.DrawRound(p, pill, 8);
-            DrawText(g, "1 ph\u00fat", pill.X + 12, pill.Y + 6, 60, 18, 13f, FontStyle.Regular, Color.White);
+            DrawText(g, "Thời gian thực", pill.X + 8, pill.Y + 6, 82, 18, 10.5f, FontStyle.Regular, Color.White);
 
-            Legend(g, r.X + 45, r.Y + 60, "Download (Mbps)", C(28, 164, 255));
-            Legend(g, r.X + 212, r.Y + 60, "Upload (Mbps)", C(38, 209, 84));
-            Plot(g, new Rectangle(r.X + 55, r.Y + 92, r.Width - 95, r.Height - 138));
+            Legend(g, r.X + 45, r.Y + 60, "Tải xuống (Mbps)", C(28, 164, 255));
+            Legend(g, r.X + 212, r.Y + 60, "Tải lên (Mbps)", C(38, 209, 84));
+            DrawText(g, $"Tải xuống {currentDownload:0.##}", r.X + 45, r.Y + 78, 160, 20, 10f, FontStyle.Regular, C(28, 164, 255));
+            DrawText(g, $"Tải lên {currentUpload:0.##}", r.X + 212, r.Y + 78, 145, 20, 10f, FontStyle.Regular, C(38, 209, 84));
+            Plot(g, new Rectangle(r.X + 55, r.Y + 106, r.Width - 95, r.Height - 152), download, upload);
         }
 
         private void DrawPerformance(Graphics g, Rectangle r)
         {
             Panel(g, r, "HI\u1ec6U SU\u1ea4T H\u1ec6 TH\u1ed0NG");
             var w = r.Width / 3;
-            var cpu = ClampPercent((float)(_monitorService?.GetCpuUsage() ?? 0));
-            var ram = ClampPercent((float)(_monitorService?.GetMemoryUsage() ?? 0));
+            var stats = _monitorService?.GetSystemStats();
+            var cpu = ClampPercent(stats?.CpuUsagePercent ?? 0);
+            var ram = ClampPercent(stats?.RamUsagePercent ?? 0);
             var disk = ClampPercent((float)(_monitorService?.GetDiskUsage() ?? 0));
-            Ring(g, new Rectangle(r.X + 28, r.Y + 63, 130, 130), cpu, C(33, 176, 244), "CPU Usage", "Thoi gian thuc", "PerformanceCounter");
-            Ring(g, new Rectangle(r.X + w + 36, r.Y + 63, 130, 130), ram, C(34, 206, 85), "RAM Usage", "Thoi gian thuc", "Physical memory");
-            Ring(g, new Rectangle(r.X + w * 2 + 42, r.Y + 63, 130, 130), disk, C(135, 55, 244), "Disk Usage", "O dia he thong", "Fallback: average");
+            Ring(g, new Rectangle(r.X + 28, r.Y + 63, 130, 130), cpu, C(33, 176, 244), "CPU Usage", "Thời gian thực", "PerformanceCounter");
+            Ring(g, new Rectangle(r.X + w + 36, r.Y + 63, 130, 130), ram, C(34, 206, 85), "RAM Usage", "Thời gian thực", "Physical memory");
+            Ring(g, new Rectangle(r.X + w * 2 + 42, r.Y + 63, 130, 130), disk, C(135, 55, 244), "Disk Usage", "Ổ đĩa hệ thống", "Dự phòng: trung bình");
         }
 
         private void DrawTable(Graphics g, Rectangle r, DashboardDevice[] rows)
@@ -388,9 +409,9 @@ namespace NetworkAdminTool.Forms
 
             if (rows.Length == 0)
             {
-                DrawText(g, "Chua co ket qua quet. Bam Quet lai de mo IP Scanner.", r.X + 28, y + 62, r.Width - 56, 26, 12f, FontStyle.Regular, C(183, 196, 217));
+                DrawText(g, "Chưa có kết quả quét. Bấm Quét lại để mở IP Scanner.", r.X + 28, y + 62, r.Width - 56, 26, 12f, FontStyle.Regular, C(183, 196, 217));
                 var viewDevicesEmpty = new Rectangle(r.X + 20, r.Bottom - 36, 205, 28);
-                DrawText(g, "Xem tat ca thiet bi ->", viewDevicesEmpty.X, viewDevicesEmpty.Y + 4, viewDevicesEmpty.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-devices", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
+                DrawText(g, "Xem tất cả thiết bị ->", viewDevicesEmpty.X, viewDevicesEmpty.Y + 4, viewDevicesEmpty.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-devices", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
                 Hit(viewDevicesEmpty, () => _services.GetRequiredService<NetworkInfoForm>().Show(), "dashboard-devices");
                 return;
             }
@@ -413,7 +434,7 @@ namespace NetworkAdminTool.Forms
             }
             if (rows.Length > maxVisibleRows)
             {
-                DrawText(g, $"+{rows.Length - maxVisibleRows} thiet bi khac", r.Right - 175, r.Bottom - 36, 145, 20, 10.5f, FontStyle.Regular, C(183, 196, 217), true);
+                DrawText(g, $"+{rows.Length - maxVisibleRows} thiết bị khác", r.Right - 175, r.Bottom - 36, 145, 20, 10.5f, FontStyle.Regular, C(183, 196, 217), true);
             }
             var viewDevices = new Rectangle(r.X + 20, r.Bottom - 36, 205, 28);
             DrawText(g, "Xem t\u1ea5t c\u1ea3 thi\u1ebft b\u1ecb ->", viewDevices.X, viewDevices.Y + 4, viewDevices.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-devices", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
@@ -429,7 +450,7 @@ namespace NetworkAdminTool.Forms
             var alerts = (_dashboardState?.GetRecentAlerts(4) ?? Array.Empty<NetworkAlert>()).ToList();
             if (alerts.Count == 0)
             {
-                DrawText(g, "Chua co canh bao. Hay chay IP Scanner de cap nhat trang thai gan nhat.", r.X + 24, r.Y + 76, r.Width - 48, 24, 11.5f, FontStyle.Regular, C(183, 196, 217));
+                DrawText(g, "Chưa có cảnh báo. Hãy chạy IP Scanner để cập nhật trạng thái gần nhất.", r.X + 24, r.Y + 76, r.Width - 48, 24, 11.5f, FontStyle.Regular, C(183, 196, 217));
                 return;
             }
 
@@ -451,31 +472,48 @@ namespace NetworkAdminTool.Forms
             DrawText(g, title, r.X + 20, r.Y + 23, 300, 24, 12.5f, FontStyle.Bold, Color.White);
         }
 
-        private void Plot(Graphics g, Rectangle plot)
+        private void Plot(Graphics g, Rectangle plot, IReadOnlyList<float> download, IReadOnlyList<float> upload)
         {
             using var grid = new Pen(C(27, 60, 88)) { DashStyle = DashStyle.Dot };
             using var axis = new SolidBrush(C(213, 221, 235));
             using var font = new Font("Segoe UI", 17f, FontStyle.Regular, GraphicsUnit.Pixel);
+            var maxValue = Math.Max(1f, Math.Max(download.DefaultIfEmpty(0).Max(), upload.DefaultIfEmpty(0).Max()));
+            maxValue = (float)Math.Ceiling(maxValue * 1.2f);
+
             for (var i = 0; i <= 5; i++)
             {
                 var y = plot.Bottom - i * plot.Height / 5;
                 g.DrawLine(grid, plot.Left, y, plot.Right, y);
-                g.DrawString((i * 20).ToString(), font, axis, plot.Left - 32, y - 8);
+                g.DrawString($"{maxValue * i / 5:0.#}", font, axis, plot.Left - 45, y - 8);
             }
-            for (var i = 0; i <= 22; i++)
-                g.DrawLine(grid, plot.Left + i * plot.Width / 22, plot.Top, plot.Left + i * plot.Width / 22, plot.Bottom);
+            for (var i = 0; i <= 12; i++)
+                g.DrawLine(grid, plot.Left + i * plot.Width / 12, plot.Top, plot.Left + i * plot.Width / 12, plot.Bottom);
 
-            AreaLine(g, plot, new float[] { 64, 75, 68, 59, 49, 53, 60, 70, 80, 67, 68, 55, 46, 65, 79, 69, 69, 55, 63, 70, 75, 60, 54, 68, 70, 83 }, C(28, 164, 255));
-            AreaLine(g, plot, new float[] { 20, 27, 37, 31, 23, 26, 31, 28, 36, 42, 35, 27, 26, 31, 37, 33, 36, 31, 20, 25, 37, 26, 23, 26, 27, 31 }, C(38, 209, 84));
+            if (download.Count < 2 && upload.Count < 2)
+            {
+                DrawText(g, "Đang lấy mẫu lưu lượng...", plot.Left + 20, plot.Top + plot.Height / 2 - 12, plot.Width - 40, 24, 11f, FontStyle.Regular, C(183, 196, 217), true);
+            }
+            else
+            {
+                AreaLine(g, plot, download, maxValue, C(28, 164, 255));
+                AreaLine(g, plot, upload, maxValue, C(38, 209, 84));
+            }
 
-            var times = new[] { "10:24", "10:25", "10:26", "10:27", "10:28", "10:29", "10:30" };
-            for (var i = 0; i < times.Length; i++)
-                g.DrawString(times[i], font, axis, plot.Left + i * plot.Width / (times.Length - 1) - 17, plot.Bottom + 13);
+            g.DrawString("-60s", font, axis, plot.Left - 10, plot.Bottom + 13);
+            g.DrawString("Bây giờ", font, axis, plot.Right - 50, plot.Bottom + 13);
         }
 
-        private void AreaLine(Graphics g, Rectangle plot, float[] values, Color color)
+        private void AreaLine(Graphics g, Rectangle plot, IReadOnlyList<float> values, float maxValue, Color color)
         {
-            var pts = values.Select((v, i) => new PointF(plot.Left + i * plot.Width / (float)(values.Length - 1), plot.Bottom - v / 100f * plot.Height)).ToArray();
+            if (values.Count == 0)
+                return;
+
+            var chartValues = values.Count == 1 ? new[] { values[0], values[0] } : values.ToArray();
+            var pts = chartValues.Select((v, i) =>
+            {
+                var safeValue = Math.Max(0, Math.Min(v, maxValue));
+                return new PointF(plot.Left + i * plot.Width / (float)(chartValues.Length - 1), plot.Bottom - safeValue / maxValue * plot.Height);
+            }).ToArray();
             using var area = new GraphicsPath();
             area.AddLines(pts);
             area.AddLine(pts[^1].X, plot.Bottom, pts[0].X, plot.Bottom);
@@ -487,6 +525,63 @@ namespace NetworkAdminTool.Forms
             using var dot = new SolidBrush(color);
             foreach (var p in pts)
                 g.FillEllipse(dot, p.X - 4, p.Y - 4, 8, 8);
+        }
+
+        private void UpdateNetworkTrafficSample()
+        {
+            var now = DateTime.UtcNow;
+            if (_lastTrafficSampleUtc != DateTime.MinValue && (now - _lastTrafficSampleUtc).TotalMilliseconds < 900)
+                return;
+
+            try
+            {
+                long bytesReceived = 0;
+                long bytesSent = 0;
+                foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (networkInterface.OperationalStatus != OperationalStatus.Up ||
+                        networkInterface.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                    {
+                        continue;
+                    }
+
+                    var stats = networkInterface.GetIPv4Statistics();
+                    bytesReceived += stats.BytesReceived;
+                    bytesSent += stats.BytesSent;
+                }
+
+                if (_lastBytesReceived.HasValue && _lastBytesSent.HasValue)
+                {
+                    var seconds = Math.Max(0.001, (now - _lastTrafficSampleUtc).TotalSeconds);
+                    var downloadMbps = (float)Math.Max(0, (bytesReceived - _lastBytesReceived.Value) * 8d / seconds / 1_000_000d);
+                    var uploadMbps = (float)Math.Max(0, (bytesSent - _lastBytesSent.Value) * 8d / seconds / 1_000_000d);
+                    EnqueueTrafficSample(downloadMbps, uploadMbps);
+                }
+                else
+                {
+                    EnqueueTrafficSample(0, 0);
+                }
+
+                _lastBytesReceived = bytesReceived;
+                _lastBytesSent = bytesSent;
+                _lastTrafficSampleUtc = now;
+            }
+            catch
+            {
+                EnqueueTrafficSample(0, 0);
+                _lastTrafficSampleUtc = now;
+            }
+        }
+
+        private void EnqueueTrafficSample(float downloadMbps, float uploadMbps)
+        {
+            _downloadMbpsHistory.Enqueue(downloadMbps);
+            _uploadMbpsHistory.Enqueue(uploadMbps);
+
+            while (_downloadMbpsHistory.Count > 60)
+                _downloadMbpsHistory.Dequeue();
+            while (_uploadMbpsHistory.Count > 60)
+                _uploadMbpsHistory.Dequeue();
         }
 
         private void Ring(Graphics g, Rectangle r, int value, Color color, string title, string sub1, string sub2)
@@ -574,9 +669,9 @@ namespace NetworkAdminTool.Forms
         private static string FormatUptime(TimeSpan uptime)
         {
             if (uptime.TotalDays >= 1)
-                return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
+                return $"{(int)uptime.TotalDays} ngày {uptime.Hours} giờ";
 
-            return $"{uptime.Hours}h {uptime.Minutes}m";
+            return $"{uptime.Hours} giờ {uptime.Minutes} phút";
         }
 
         private void DrawText(Graphics g, string text, int x, int y, int w, int h, float size, FontStyle style, Color color, bool center = false)

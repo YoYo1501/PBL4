@@ -12,14 +12,26 @@ namespace NetworkAdminTool.Services
     /// </summary>
     public class SystemMonitorService : ISystemMonitorService
     {
+        private static readonly TimeSpan CpuSampleInterval = TimeSpan.FromMilliseconds(900);
+
         private readonly PerformanceCounter _cpuCounter =
             new("Processor", "% Processor Time", "_Total");
 
         private readonly ComputerInfo _computerInfo = new();
+        private readonly object _cpuSyncRoot = new();
+        private float _lastCpuUsagePercent;
+        private DateTime _lastCpuSampleUtc = DateTime.MinValue;
 
         public SystemMonitorService()
         {
-            _cpuCounter.NextValue();
+            try
+            {
+                _cpuCounter.NextValue();
+            }
+            catch
+            {
+                _lastCpuUsagePercent = 0f;
+            }
         }
 
         public double GetCpuUsage()
@@ -81,7 +93,29 @@ namespace NetworkAdminTool.Services
         /// </summary>
         public float GetCpuUsagePercent()
         {
-            return _cpuCounter.NextValue();
+            lock (_cpuSyncRoot)
+            {
+                var now = DateTime.UtcNow;
+                if (now - _lastCpuSampleUtc < CpuSampleInterval)
+                    return _lastCpuUsagePercent;
+
+                try
+                {
+                    var value = _cpuCounter.NextValue();
+                    if (!float.IsNaN(value) && !float.IsInfinity(value))
+                    {
+                        _lastCpuUsagePercent = Math.Max(0f, Math.Min(100f, value));
+                    }
+
+                    _lastCpuSampleUtc = now;
+                }
+                catch
+                {
+                    _lastCpuSampleUtc = now;
+                }
+
+                return _lastCpuUsagePercent;
+            }
         }
 
         /// <summary>

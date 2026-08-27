@@ -15,10 +15,10 @@ namespace NetworkAdminTool.Forms
             _networkInfoService = networkInfoService;
             FeatureFormStyle.ApplyWindow(this, "Network Info", new Size(920, 560), new Size(720, 420));
 
-            _summary = FeatureFormStyle.BuildSubtitle("Dang tai thong tin adapter...");
+            _summary = FeatureFormStyle.BuildSubtitle("Đang tải thông tin adapter...");
             _grid = FeatureFormStyle.BuildGrid();
             _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Adapter", DataPropertyName = "Name", FillWeight = 18 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Mo ta", DataPropertyName = "Description", FillWeight = 36 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Mô tả", DataPropertyName = "Description", FillWeight = 36 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "IP Address", DataPropertyName = "IpAddress", FillWeight = 18 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Subnet", DataPropertyName = "Subnet", FillWeight = 16 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Gateway", DataPropertyName = "Gateway", FillWeight = 18 });
@@ -35,8 +35,9 @@ namespace NetworkAdminTool.Forms
             body.Controls.Add(_summary, 0, 0);
             body.Controls.Add(_grid, 0, 1);
 
-            Controls.Add(FeatureFormStyle.BuildShell("Network Info", "Thong tin cac card mang dang hoat dong", body));
+            Controls.Add(FeatureFormStyle.BuildShell("Network Info", "Thông tin các card mạng đang hoạt động", body));
             Load += (_, _) => LoadInterfaces();
+            Activated += (_, _) => LoadInterfaces();
         }
 
         private void LoadInterfaces()
@@ -54,8 +55,8 @@ namespace NetworkAdminTool.Forms
 
             _grid.DataSource = rows;
             _summary.Text = rows.Count == 0
-                ? "Khong tim thay adapter dang hoat dong."
-                : $"Tim thay {rows.Count} adapter dang hoat dong.";
+                ? "Không tìm thấy adapter đang hoạt động."
+                : $"Tìm thấy {rows.Count} adapter đang hoạt động.";
         }
     }
 
@@ -78,12 +79,12 @@ namespace NetworkAdminTool.Forms
                 ForeColor = FeatureFormStyle.Ink,
                 BorderStyle = BorderStyle.None
             };
-            _list.Columns.Add("Muc do", 110);
-            _list.Columns.Add("Noi dung", 390);
-            _list.Columns.Add("Chi tiet", 180);
-            _list.Columns.Add("Thoi gian", 140);
+            _list.Columns.Add("Mức độ", 110);
+            _list.Columns.Add("Nội dung", 390);
+            _list.Columns.Add("Chi tiết", 180);
+            _list.Columns.Add("Thời gian", 140);
 
-            Controls.Add(FeatureFormStyle.BuildShell("Alerts", "Theo doi cac su kien mang gan day", _list));
+            Controls.Add(FeatureFormStyle.BuildShell("Alerts", "Theo dõi các sự kiện mạng gần đây", _list));
             Load += (_, _) => LoadAlerts();
         }
 
@@ -95,7 +96,7 @@ namespace NetworkAdminTool.Forms
             {
                 _list.Items.Add(new ListViewItem(new[]
                 {
-                    alert.Severity.Equals("Warning", StringComparison.OrdinalIgnoreCase) ? "Canh bao" : "Thong tin",
+                    alert.Severity.Equals("Warning", StringComparison.OrdinalIgnoreCase) ? "Cảnh báo" : "Thông tin",
                     alert.Title,
                     alert.Message,
                     alert.CreatedAt.ToString("HH:mm:ss")
@@ -104,8 +105,10 @@ namespace NetworkAdminTool.Forms
 
             if (_list.Items.Count == 0)
             {
-                _list.Items.Add(new ListViewItem(new[] { "Thong tin", "Chua co canh bao", "Hay chay IP Scanner de cap nhat", "-" }));
+                _list.Items.Add(new ListViewItem(new[] { "Thông tin", "Chưa có cảnh báo", "Hãy chạy IP Scanner để cập nhật", "-" }));
             }
+
+            _dashboardState.MarkAlertsSeen();
         }
     }
 
@@ -151,7 +154,7 @@ namespace NetworkAdminTool.Forms
             body.Controls.Add(FeatureFormStyle.WrapPanel(_files, new Padding(0, 0, 14, 0)), 0, 0);
             body.Controls.Add(FeatureFormStyle.WrapPanel(_content, Padding.Empty), 1, 0);
 
-            Controls.Add(FeatureFormStyle.BuildShell("Logs", "Doc log trong thu muc Logs", body));
+            Controls.Add(FeatureFormStyle.BuildShell("Logs", "Đọc log trong thư mục Logs", body));
             Load += (_, _) => LoadLogs();
         }
 
@@ -164,7 +167,7 @@ namespace NetworkAdminTool.Forms
 
             if (!Directory.Exists(logDir))
             {
-                _content.Text = "Chua co thu muc Logs.";
+                _content.Text = "Chưa có thư mục Logs.";
                 return;
             }
 
@@ -174,7 +177,7 @@ namespace NetworkAdminTool.Forms
             if (_files.Items.Count > 0)
                 _files.SelectedIndex = 0;
             else
-                _content.Text = "Chua co file log.";
+                _content.Text = "Chưa có file log.";
         }
 
         private void LoadSelectedLog()
@@ -188,7 +191,7 @@ namespace NetworkAdminTool.Forms
             }
             catch (Exception ex)
             {
-                _content.Text = $"Khong doc duoc log: {ex.Message}";
+                _content.Text = $"Không đọc được log: {ex.Message}";
             }
         }
     }
@@ -209,13 +212,13 @@ namespace NetworkAdminTool.Forms
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190F));
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
 
-            AddSetting(body, "Default subnet", configuration["NetworkSettings:DefaultSubnet"] ?? "-");
-            AddSetting(body, "Ping timeout", $"{configuration["NetworkSettings:PingTimeoutMs"] ?? "-"} ms");
-            AddSetting(body, "Scan timeout", $"{configuration["NetworkSettings:ScanTimeoutMs"] ?? "-"} ms");
-            AddSetting(body, "Max hosts", configuration["NetworkSettings:MaxHostsToScan"] ?? "-");
-            AddSetting(body, "Log folder", configuration["Logging:LogFolder"] ?? "Logs");
+            AddSetting(body, "Subnet mặc định", configuration["NetworkSettings:DefaultSubnet"] ?? "-");
+            AddSetting(body, "Timeout Ping", $"{configuration["NetworkSettings:PingTimeoutMs"] ?? "-"} ms");
+            AddSetting(body, "Timeout Scan", $"{configuration["NetworkSettings:ScanTimeoutMs"] ?? "-"} ms");
+            AddSetting(body, "Số host tối đa", configuration["NetworkSettings:MaxHostsToScan"] ?? "-");
+            AddSetting(body, "Thư mục log", configuration["Logging:LogFolder"] ?? "Logs");
 
-            Controls.Add(FeatureFormStyle.BuildShell("Settings", "Cau hinh hien tai cua ung dung", FeatureFormStyle.WrapPanel(body, Padding.Empty)));
+            Controls.Add(FeatureFormStyle.BuildShell("Settings", "Cấu hình hiện tại của ứng dụng", FeatureFormStyle.WrapPanel(body, Padding.Empty)));
         }
 
         private static void AddSetting(TableLayoutPanel body, string name, string value)
@@ -246,10 +249,10 @@ namespace NetworkAdminTool.Forms
             body.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
             body.Controls.Add(FeatureFormStyle.BuildValueLabel("Network Administration Tool", true, 18F), 0, 0);
             body.Controls.Add(FeatureFormStyle.BuildValueLabel(".NET WinForms - PBL4", false), 0, 1);
-            body.Controls.Add(FeatureFormStyle.BuildValueLabel("Cong cu ho tro quan tri mang cuc bo: quet IP, ping, theo doi CPU/RAM, xem thong tin adapter va log hoat dong.", false), 0, 2);
+            body.Controls.Add(FeatureFormStyle.BuildValueLabel("Công cụ hỗ trợ quản trị mạng cục bộ: quét IP, ping, theo dõi CPU/RAM, xem thông tin adapter và log hoạt động.", false), 0, 2);
             body.Controls.Add(FeatureFormStyle.BuildValueLabel("Version 1.0.0", true), 0, 3);
 
-            Controls.Add(FeatureFormStyle.BuildShell("About", "Thong tin ung dung", FeatureFormStyle.WrapPanel(body, Padding.Empty)));
+            Controls.Add(FeatureFormStyle.BuildShell("About", "Thông tin ứng dụng", FeatureFormStyle.WrapPanel(body, Padding.Empty)));
         }
     }
 

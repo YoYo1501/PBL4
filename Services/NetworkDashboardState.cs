@@ -7,6 +7,7 @@ public sealed class NetworkDashboardState
     private readonly object _syncRoot = new();
     private readonly Dictionary<string, NetworkDevice> _knownDevices = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<NetworkAlert> _alerts = new();
+    private DateTime? _alertsSeenAt;
 
     public string LastSubnet { get; private set; } = string.Empty;
     public DateTime? LastScanAt { get; private set; }
@@ -36,7 +37,7 @@ public sealed class NetworkDashboardState
                 {
                     if (known.IsOnline)
                     {
-                        AddAlert("Warning", $"Thiet bi {known.IpAddress} mat ket noi", "Device offline", scanAt);
+                        AddAlert("Warning", $"Thiết bị {known.IpAddress} mất kết nối", "Thiết bị offline", scanAt);
                     }
 
                     known.IsOnline = false;
@@ -51,7 +52,7 @@ public sealed class NetworkDashboardState
                 {
                     if (!known.IsOnline)
                     {
-                        AddAlert("Info", $"Thiet bi {device.IpAddress} vua online", "Device online", scanAt);
+                        AddAlert("Info", $"Thiết bị {device.IpAddress} vừa online", "Thiết bị online", scanAt);
                     }
 
                     known.MacAddress = string.IsNullOrWhiteSpace(device.MacAddress) ? known.MacAddress : device.MacAddress;
@@ -61,7 +62,7 @@ public sealed class NetworkDashboardState
                 }
                 else
                 {
-                    AddAlert("Info", $"Phat hien thiet bi {device.IpAddress}", "New device online", scanAt);
+                    AddAlert("Info", $"Phát hiện thiết bị {device.IpAddress}", "Thiết bị online mới", scanAt);
                     _knownDevices[device.IpAddress] = new NetworkDevice
                     {
                         IpAddress = device.IpAddress,
@@ -73,7 +74,7 @@ public sealed class NetworkDashboardState
                 }
             }
 
-            AddAlert("Info", $"Hoan tat quet mang {subnet}", $"Online: {onlineCount}, Offline da biet: {offlineCount}", scanAt);
+            AddAlert("Info", $"Hoàn tất quét mạng {subnet}", $"Online: {onlineCount}, Offline đã biết: {offlineCount}", scanAt);
         }
     }
 
@@ -101,6 +102,23 @@ public sealed class NetworkDashboardState
                     CreatedAt = alert.CreatedAt
                 })
                 .ToList();
+    }
+
+    public int GetUnreadAlertCount()
+    {
+        lock (_syncRoot)
+            return _alerts.Count(alert => !_alertsSeenAt.HasValue || alert.CreatedAt > _alertsSeenAt.Value);
+    }
+
+    public void MarkAlertsSeen()
+    {
+        lock (_syncRoot)
+        {
+            if (_alerts.Count > 0)
+                _alertsSeenAt = _alerts.Max(alert => alert.CreatedAt);
+            else
+                _alertsSeenAt = DateTime.Now;
+        }
     }
 
     private void AddAlert(string severity, string title, string message, DateTime createdAt)

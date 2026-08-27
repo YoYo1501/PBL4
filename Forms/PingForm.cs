@@ -74,7 +74,7 @@ namespace NetworkAdminTool.Forms
             }, 0, 0);
             header.Controls.Add(new Label
             {
-                Text = "Kiem tra do tre va trang thai ket noi cua mot host",
+                Text = "Kiểm tra độ trễ và trạng thái kết nối của một host",
                 Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI", 11.5F),
                 ForeColor = Muted,
@@ -129,7 +129,7 @@ namespace NetworkAdminTool.Forms
 
             lblStatus = new Label
             {
-                Text = "San sang ping",
+                Text = "Sẵn sàng ping",
                 Dock = DockStyle.Fill,
                 ForeColor = Muted,
                 Font = new Font("Segoe UI", 10.5F),
@@ -179,8 +179,8 @@ namespace NetworkAdminTool.Forms
             }
 
             btnPing!.Enabled = false;
-            lblStatus!.Text = $"Dang ping {host}...";
-            lblResult!.Text = "Dang gui goi ICMP va cho phan hoi...";
+            lblStatus!.Text = $"Đang ping {host}...";
+            lblResult!.Text = "Đang gửi gói ICMP và chờ phản hồi...";
 
             try
             {
@@ -189,7 +189,7 @@ namespace NetworkAdminTool.Forms
                 lblResult.Text = result.Success
                     ? $"Thành công!\nThời gian phản hồi: {result.RoundtripTimeMs} ms\nTrạng thái: {result.StatusMessage}"
                     : $"Thất bại.\nTrạng thái: {result.StatusMessage}";
-                lblStatus.Text = result.Success ? "Host phan hoi thanh cong" : "Host khong phan hoi";
+                lblStatus.Text = result.Success ? "Host phản hồi thành công" : "Host không phản hồi";
 
                 _logger.Log($"Ping {host}: {result.StatusMessage}");
             }
