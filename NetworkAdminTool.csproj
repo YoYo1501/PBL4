@@ -15,6 +15,23 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="NetworkAdmin.Client\**\*.cs" />
+    <Compile Remove="NetworkAdmin.Server\**\*.cs" />
+    <Compile Remove="NetworkAdmin.Shared\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="NetworkAdmin.Client\Services\SystemMonitorService.cs" Link="Services\SystemMonitorService.cs" />
+    <Compile Include="NetworkAdmin.Client\Services\NetworkInfoService.cs" Link="Services\NetworkInfoService.cs" />
+    <Compile Include="NetworkAdmin.Client\Services\PingService.cs" Link="Services\PingService.cs" />
+    <Compile Include="NetworkAdmin.Client\Services\NetworkScannerService.cs" Link="Services\NetworkScannerService.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

@@ -1,3 +1,6 @@
 <Solution>
   <Project Path="NetworkAdminTool.csproj" />
+  <Project Path="NetworkAdmin.Client\NetworkAdmin.Client.csproj" />
+  <Project Path="NetworkAdmin.Server\NetworkAdmin.Server.csproj" />
+  <Project Path="NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
 </Solution>

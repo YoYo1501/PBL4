@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>NetworkAdmin.Client</RootNamespace>
+    <AssemblyName>NetworkAdmin.Client</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Interfaces\ISystemMonitorService.cs" Link="Interfaces\ISystemMonitorService.cs" />
+    <Compile Include="..\Interfaces\INetworkInfoService.cs" Link="Interfaces\INetworkInfoService.cs" />
+    <Compile Include="..\Interfaces\INetworkScannerService.cs" Link="Interfaces\INetworkScannerService.cs" />
+    <Compile Include="..\Interfaces\IPingService.cs" Link="Interfaces\IPingService.cs" />
+    <Compile Include="..\Interfaces\ILoggerService.cs" Link="Interfaces\ILoggerService.cs" />
+    <Compile Include="..\Models\NetworkScanProgress.cs" Link="Models\NetworkScanProgress.cs" />
+    <Compile Include="..\Forms\MainForm.cs" Link="Forms\MainForm.cs" />
+    <Compile Include="..\Forms\MonitorForm.cs" Link="Forms\MonitorForm.cs" />
+    <Compile Include="..\Forms\PingForm.cs" Link="Forms\PingForm.cs" />
+    <Compile Include="..\Forms\ScannerForm.cs" Link="Forms\ScannerForm.cs" />
+    <Compile Include="..\Forms\FeatureForms.cs" Link="Forms\FeatureForms.cs" />
+    <Compile Include="..\Services\LoggerService.cs" Link="Services\LoggerService.cs" />
+    <Compile Include="..\Services\NetworkDashboardState.cs" Link="Services\NetworkDashboardState.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\appsettings.json" Link="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\Assets\**\*.*" LinkBase="Assets" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
