@@ -22,10 +22,16 @@ internal sealed class TcpHelloServer
         _commandDispatcher = commandDispatcher;
     }
 
+    private volatile bool _isListening;
+    public bool IsListening => _isListening;
+
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        using var connections = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var listener = new TcpListener(_options.Host, _options.Port);
         listener.Start();
+        _isListening = true;
+        var handlers = new List<Task>();
 
         Console.WriteLine($"Listening on {_options.Host}:{_options.Port}");
 
@@ -34,7 +40,8 @@ internal sealed class TcpHelloServer
             while (!cancellationToken.IsCancellationRequested)
             {
                 var client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
-                _ = Task.Run(() => HandleClientAsync(client, cancellationToken), CancellationToken.None);
+                handlers.RemoveAll(t => t.IsCompleted);
+                handlers.Add(HandleClientAsync(client, connections.Token));
             }
         }
         catch (OperationCanceledException)
@@ -42,7 +49,10 @@ internal sealed class TcpHelloServer
         }
         finally
         {
+            _isListening = false;
             listener.Stop();
+            await connections.CancelAsync();
+            await Task.WhenAll(handlers).ConfigureAwait(false);
         }
     }
 
@@ -85,8 +95,8 @@ internal sealed class TcpHelloServer
                 Console.WriteLine($"ClientName: {session.ClientName}");
                 Console.WriteLine($"SessionId: {session.SessionId}");
 
-                await JsonLineProtocol.SendAsync(
-                    stream,
+                await _clientManager.SendAsync(
+                    sessionId,
                     MessageType.HelloAck,
                     envelope.RequestId,
                     new HelloAckMessage
@@ -96,6 +106,8 @@ internal sealed class TcpHelloServer
                         Message = "Hello accepted"
                     },
                     serverCancellationToken).ConfigureAwait(false);
+
+                session.IsReady = true;
 
                 while (!serverCancellationToken.IsCancellationRequested)
                 {
@@ -159,8 +171,8 @@ internal sealed class TcpHelloServer
         {
             if (!string.IsNullOrWhiteSpace(sessionId))
             {
-                _commandDispatcher.FailPendingForSession(sessionId, new IOException($"Client disconnected: {sessionId}"));
                 _clientManager.Remove(sessionId);
+                _commandDispatcher.FailPendingForSession(sessionId, new IOException($"Client disconnected: {sessionId}"));
             }
         }
     }
@@ -202,6 +214,7 @@ internal sealed class TcpHelloServer
             }
 
             networkInfo.Interfaces ??= new List<NetworkInterfaceInfo>();
+            networkInfo.Interfaces = networkInfo.Interfaces.Where(i => i is not null).ToList();
 
             if (!_clientManager.UpdateNetworkInfo(sessionId, networkInfo, out var session) || session is null)
             {
@@ -242,7 +255,7 @@ internal sealed class TcpHelloServer
                 return;
             }
 
-            if (!_commandDispatcher.CompletePing(envelope.RequestId, result))
+            if (!_commandDispatcher.CompletePing(sessionId, envelope.RequestId, result))
             {
                 Console.WriteLine($"Unexpected PingResult from {sessionId}: {envelope.RequestId}");
                 return;
@@ -272,18 +285,21 @@ internal sealed class TcpHelloServer
                 return;
             }
 
-            if (!_clientManager.UpdateScanResult(sessionId, result, out var session) || session is null)
+            result.Devices ??= new();
+            result.Devices = result.Devices.Where(d => d is not null).ToList();
+            if (!_clientManager.TryGet(sessionId, out var session) || session is null)
             {
                 Console.WriteLine($"ScanResult from unknown session: {sessionId}");
                 return;
             }
 
-            if (!_commandDispatcher.CompleteScan(envelope.RequestId, result))
+            if (!_commandDispatcher.CompleteScan(sessionId, envelope.RequestId, result))
             {
                 Console.WriteLine($"Unexpected ScanResult from {sessionId}: {envelope.RequestId}");
                 return;
             }
 
+            _clientManager.UpdateScanResult(sessionId, result, out _);
             Console.WriteLine("Scan completed");
             Console.WriteLine($"Client: {session.ClientName}");
             Console.WriteLine($"Devices found: {result.Devices.Count}");

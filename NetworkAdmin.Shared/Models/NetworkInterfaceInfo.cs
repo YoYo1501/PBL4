@@ -7,6 +7,7 @@ public class NetworkInterfaceInfo
     public string IpAddress { get; set; } = string.Empty;
     public string MacAddress { get; set; } = string.Empty;
     public string Gateway { get; set; } = string.Empty;
+    public string Subnet { get; set; } = string.Empty;
 
     public override string ToString()
     {

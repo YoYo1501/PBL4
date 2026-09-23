@@ -1,6 +1,5 @@
 using System.Text.Json;
-using System.Net;
-using System.Net.Sockets;
+using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdminTool.Interfaces;
 using NetworkAdminTool.Models;
@@ -66,10 +65,11 @@ internal sealed class ClientCommandHandler
             }
 
             Console.WriteLine($"PingRequest received: {target}");
-            var result = await _pingService.PingAsync(target, timeoutMs: 1000, retryCount: 1).ConfigureAwait(false);
+            var result = await _pingService.PingSeriesAsync(target, cancellationToken).ConfigureAwait(false);
             Console.WriteLine($"PingResult sent: {target} -> {result.StatusMessage}");
             return result;
         }
+        catch (OperationCanceledException) { throw; }
         catch (JsonException ex)
         {
             return new PingResult
@@ -94,9 +94,13 @@ internal sealed class ClientCommandHandler
 
     private async Task HandleScanCommandAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
     {
-        var result = await HandleScanAsync(envelope, cancellationToken).ConfigureAwait(false);
-        await _connection.SendAsync(MessageType.ScanResult, envelope.RequestId, result, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            var result = await HandleScanAsync(envelope, cancellationToken).ConfigureAwait(false);
+            await _connection.SendAsync(MessageType.ScanResult, envelope.RequestId, result, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) { Console.WriteLine($"Scan delivery stopped: {ex.Message}"); }
     }
 
     private async Task<ScanResultMessage> HandleScanAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
@@ -124,7 +128,7 @@ internal sealed class ClientCommandHandler
                 {
                     Success = false,
                     Subnet = subnet,
-                    ErrorMessage = "Invalid scan subnet."
+                    ErrorMessage = ScanSubnet.Help
                 };
             }
 
@@ -172,22 +176,5 @@ internal sealed class ClientCommandHandler
         }
     }
 
-    private static bool IsSupportedScanSubnet(string subnet)
-    {
-        var legacyParts = subnet.Split('.', StringSplitOptions.TrimEntries);
-        if (legacyParts.Length == 3)
-        {
-            return legacyParts.All(part => int.TryParse(part, out var octet) && octet >= 0 && octet <= 255);
-        }
-
-        var cidrParts = subnet.Split('/', StringSplitOptions.TrimEntries);
-        if (cidrParts.Length != 2 ||
-            !IPAddress.TryParse(cidrParts[0], out var baseAddress) ||
-            baseAddress.AddressFamily != AddressFamily.InterNetwork)
-        {
-            return false;
-        }
-
-        return int.TryParse(cidrParts[1], out var prefixLength) && prefixLength is >= 1 and <= 30;
-    }
+    private static bool IsSupportedScanSubnet(string subnet) => ScanSubnet.TryNormalize(subnet, out _);
 }

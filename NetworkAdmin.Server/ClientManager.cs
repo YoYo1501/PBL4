@@ -20,7 +20,8 @@ internal sealed class ClientManager
             SessionId = sessionId,
             Stream = stream,
             ConnectedAt = now,
-            LastSeen = now
+            LastSeen = now,
+            RemoteAddress = (stream.Socket.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString() ?? string.Empty
         };
 
         _sessions[sessionId] = session;
@@ -38,6 +39,7 @@ internal sealed class ClientManager
         {
             session.LastSeen = DateTime.UtcNow;
             session.LatestSystemStats = stats;
+            session.LastTelemetryAt = session.LastSeen;
         }
 
         return true;
@@ -45,10 +47,8 @@ internal sealed class ClientManager
 
     public void Remove(string sessionId)
     {
-        if (_sessions.TryRemove(sessionId, out var session))
-        {
-            session.SendLock.Dispose();
-        }
+        // Writers may still hold or await the semaphore. Let it be collected with the session.
+        _sessions.TryRemove(sessionId, out _);
     }
 
     public bool UpdateNetworkInfo(string sessionId, ClientNetworkInfo networkInfo, out ClientSessionInfo? session)
@@ -87,7 +87,7 @@ internal sealed class ClientManager
         _sessions.TryGetValue(sessionId, out session);
 
     public IReadOnlyList<ClientSessionInfo> GetSessions() =>
-        _sessions.Values.OrderBy(s => s.ConnectedAt).ToList();
+        _sessions.Values.Where(s => s.IsReady).OrderBy(s => s.ConnectedAt).ToList();
 
     public async Task SendAsync<TPayload>(
         string sessionId,

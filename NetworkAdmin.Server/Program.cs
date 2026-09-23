@@ -2,7 +2,24 @@ namespace NetworkAdmin.Server;
 
 internal static class Program
 {
-    private static async Task Main(string[] args)
+    [STAThread]
+    private static void Main(string[] args)
+    {
+        if (args.Contains("--console", StringComparer.OrdinalIgnoreCase))
+        {
+            AllocConsole();
+            try { RunConsoleAsync(args).GetAwaiter().GetResult(); }
+            catch (Exception ex) { Console.WriteLine($"Server stopped: {ex.Message}"); }
+            return;
+        }
+        ApplicationConfiguration.Initialize();
+        Application.Run(new ServerDashboardForm(new ServerRuntime(ServerOptions.Load(args))));
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool AllocConsole();
+
+    private static async Task RunConsoleAsync(string[] args)
     {
         var options = ServerOptions.Load(args);
         using var cancellation = new CancellationTokenSource();
@@ -21,7 +38,8 @@ internal static class Program
 
         await Task.WhenAny(serverTask, commandTask).ConfigureAwait(false);
         cancellation.Cancel();
-        await Task.WhenAll(serverTask, commandTask).ConfigureAwait(false);
+        try { await Task.WhenAll(serverTask, commandTask).ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
     }
 
     private static async Task RunCommandLoopAsync(
@@ -55,7 +73,7 @@ internal static class Program
             {
                 foreach (var session in clientManager.GetSessions())
                 {
-                    Console.WriteLine($"{session.SessionId} {session.ClientName} {session.ClientId}");
+                    Console.WriteLine($"SessionId: {session.SessionId} | Hostname: {session.ClientName} | ClientId: {session.ClientId}");
                 }
 
                 continue;
@@ -68,7 +86,7 @@ internal static class Program
                     var result = await dispatcher.SendPingAsync(
                         parts[1],
                         parts[2],
-                        TimeSpan.FromSeconds(5),
+                        TimeSpan.FromSeconds(15),
                         cancellationToken).ConfigureAwait(false);
 
                     Console.WriteLine($"Ping command completed: {result.Host} {result.StatusMessage}");
