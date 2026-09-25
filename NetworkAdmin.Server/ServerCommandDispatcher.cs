@@ -43,15 +43,7 @@ internal sealed class ServerCommandDispatcher
                 new PingRequestMessage { Target = target },
                 timeoutCts.Token).ConfigureAwait(false);
 
-            var completed = await Task.WhenAny(pending.Completion.Task, Task.Delay(timeout, timeoutCts.Token))
-                .ConfigureAwait(false);
-
-            if (completed != pending.Completion.Task)
-            {
-                throw new TimeoutException($"Ping request timed out: {requestId}");
-            }
-
-            return await pending.Completion.Task.ConfigureAwait(false);
+            return await pending.Completion.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -59,9 +51,9 @@ internal sealed class ServerCommandDispatcher
         }
     }
 
-    public bool CompletePing(string requestId, PingResult result)
+    public bool CompletePing(string sessionId, string requestId, PingResult result)
     {
-        if (!_pending.TryGetValue(requestId, out var pending))
+        if (!_pending.TryGetValue(requestId, out var pending) || pending.SessionId != sessionId)
         {
             return false;
         }
@@ -92,15 +84,7 @@ internal sealed class ServerCommandDispatcher
                 new ScanRequestMessage { Subnet = subnet, TimeoutMs = 800 },
                 cancellationToken).ConfigureAwait(false);
 
-            var completed = await Task.WhenAny(pending.Completion.Task, Task.Delay(timeout, cancellationToken))
-                .ConfigureAwait(false);
-
-            if (completed != pending.Completion.Task)
-            {
-                throw new TimeoutException($"Scan request timed out: {requestId}");
-            }
-
-            return await pending.Completion.Task.ConfigureAwait(false);
+            return await pending.Completion.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -108,9 +92,9 @@ internal sealed class ServerCommandDispatcher
         }
     }
 
-    public bool CompleteScan(string requestId, ScanResultMessage result)
+    public bool CompleteScan(string sessionId, string requestId, ScanResultMessage result)
     {
-        if (!_pendingScans.TryGetValue(requestId, out var pending))
+        if (!_pendingScans.TryGetValue(requestId, out var pending) || pending.SessionId != sessionId)
         {
             return false;
         }

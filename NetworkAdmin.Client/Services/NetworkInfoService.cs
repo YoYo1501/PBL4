@@ -48,7 +48,8 @@ public class NetworkInfoService : INetworkInfoService
                 Description = ni.Description,
                 IpAddress = GetIpv4Address(ni),
                 MacAddress = GetMacAddress(ni),
-                Gateway = GetDefaultGatewayAddress(ni)
+                Gateway = GetDefaultGatewayAddress(ni),
+                Subnet = GetSubnetPrefix(GetIpv4Address(ni))
             })
             .Where(x => !string.IsNullOrWhiteSpace(x.IpAddress))
             .OrderByDescending(x => !string.IsNullOrWhiteSpace(x.Gateway))

@@ -204,6 +204,8 @@ namespace NetworkAdminTool.Services
                 }
             }
 
+            if (octets[0] is 0 or 127 or >= 224) return false;
+
             hosts = Enumerable.Range(1, 254).Select(host => $"{octets[0]}.{octets[1]}.{octets[2]}.{host}");
             return true;
         }
@@ -226,6 +228,9 @@ namespace NetworkAdminTool.Services
             var mask = prefixLength == 0 ? 0U : uint.MaxValue << (32 - prefixLength);
             var network = baseIpValue & mask;
             var broadcast = network | ~mask;
+            if ((network >> 24) == 0 || (broadcast >> 24) >= 224 ||
+                (network <= 0x7FFFFFFF && broadcast >= 0x7F000000)) return false;
+
             if (broadcast <= network + 1)
             {
                 return false;

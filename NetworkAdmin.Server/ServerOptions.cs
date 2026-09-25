@@ -4,7 +4,7 @@ namespace NetworkAdmin.Server;
 
 internal sealed class ServerOptions
 {
-    public IPAddress Host { get; init; } = IPAddress.Loopback;
+    public IPAddress Host { get; init; } = IPAddress.Any;
     public int Port { get; init; } = 5000;
 
     public static ServerOptions Load(string[] args)

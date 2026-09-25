@@ -2,6 +2,7 @@
 bin/
 obj/
 Logs/
+artifacts/layout/
 
 *.user
 *.suo
