@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using NetworkAdmin.Server;
+using NetworkAdmin.Server.UI;
 using NetworkAdmin.Client.Services;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
@@ -23,6 +24,24 @@ foreach (var subnet in new[] { "224.0.0.0/24", "239.1.2.0/24", "255.255.255.0/24
     Check(!ScanSubnet.TryNormalize(subnet, out _), "Reject " + subnet);
 Check(ScanSubnet.TryNormalize("192.168.1.129/25", out var normalized) && normalized == "192.168.1.128/25", "Normalize CIDR");
 Check(ScanSubnet.TryNormalize("192.168.1", out normalized) && normalized == "192.168.1.0/24", "Legacy subnet prefix");
+var now = DateTime.UtcNow;
+var snapshot = new ClientSnapshot("history-A", "id-A", "A", "10.1.1.10", true, now, now, now, 10, 20,
+    [new("vEthernet", "172.20.0.1", "virtual", "172.20.0.2", "172.20.0.0/24"),
+     new("Ethernet 2", "192.168.10.1", "vmware", "192.168.10.2", "192.168.10.0/24", "VMware Virtual Ethernet Adapter"),
+     new("Ethernet", "10.1.2.10", "physical", "", "10.1.2.0/24"),
+     new("Wi-Fi", "10.1.1.10", "wifi", "10.1.1.1", "10.1.1.0/24", "Intel Wireless")]);
+Check(snapshot.PrimaryInterface?.Name == "Wi-Fi" && snapshot.IpAddress == "10.1.1.10", "Primary physical adapter prefers gateway over virtual NICs");
+Check(snapshot.Interfaces.Count == 4, "All adapters remain available in details");
+Check((snapshot with { Interfaces = snapshot.Interfaces.Take(2).ToArray() }).PrimaryInterface is null, "Virtual-only snapshots do not invent a physical primary NIC");
+var history = new TelemetryHistory();
+for (var i = 0; i < 65; i++) history.Observe([snapshot with { LastTelemetryAt = now.AddSeconds(i), Cpu = i }]);
+Check(history.For("history-A").Count == 60 && history.For("history-A")[0].Cpu == 5, "Chart retains the last 60 samples");
+history.Observe([snapshot with { LastTelemetryAt = now.AddSeconds(64), Cpu = 64, Connected = false }]);
+Check(history.For("history-A").Count == 60, "Polling and disconnect do not fabricate chart samples");
+history.Observe([snapshot with { LastTelemetryAt = now.AddSeconds(64), Cpu = 64 }, snapshot with { SessionId = "history-B", Cpu = 91 }]);
+Check(history.For("history-A").Last().Cpu == 64 && history.For("history-B").Single().Cpu == 91, "Client chart histories stay separate");
+history.Observe([snapshot with { SessionId = "history-B", Cpu = 91 }]);
+Check(history.For("history-A").Count == 0, "Evicted session chart data is released");
 var ping = await new PingService().PingSeriesAsync("127.0.0.1");
 Check(ping.Sent == 4 && ping.Attempts.Count == 4 && ping.Received == 4 && ping.Lost == 0 && ping.AverageResponseTimeMs.HasValue, "Actual ICMP: four loopback probes and statistics");
 using (var canceled = new CancellationTokenSource())
