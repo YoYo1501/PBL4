@@ -48,7 +48,7 @@ internal sealed class ClientRuntime
                 retrySeconds = 1;
                 var networkInfoService = new ClientNetworkInfoService(_networkInfoService, connection);
                 await networkInfoService.SendSnapshotAsync(session.Token).ConfigureAwait(false);
-                handler = new ClientCommandHandler(_pingService, connection);
+                handler = new ClientCommandHandler(_pingService, connection, _options.AdminToken);
                 handler.SetScanner(_scannerService);
                 reader = connection.RunReadLoopAsync(handler.HandleAsync, session.Token);
                 telemetry = new ClientTelemetryService(_monitorService, connection, _options.TelemetryInterval)

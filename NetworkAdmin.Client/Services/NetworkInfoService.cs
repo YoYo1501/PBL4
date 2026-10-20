@@ -210,7 +210,7 @@ public class NetworkInfoService : INetworkInfoService
 
     private static string GetIpv4Address(NetworkInterface ni) =>
         ni.GetIPProperties().UnicastAddresses
-            .FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork)?.Address.ToString() ?? string.Empty;
+            .FirstOrDefault(a => NetworkInterfacePolicy.HasUsableIpv4(a.Address.ToString()))?.Address.ToString() ?? string.Empty;
 
     private static string GetDefaultGatewayAddress(NetworkInterface ni) =>
         ni.GetIPProperties().GatewayAddresses

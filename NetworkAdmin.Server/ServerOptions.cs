@@ -6,6 +6,7 @@ internal sealed class ServerOptions
 {
     public IPAddress Host { get; init; } = IPAddress.Any;
     public int Port { get; init; } = 5000;
+    public string AdminToken { get; init; } = string.Empty;
 
     public static ServerOptions Load(string[] args)
     {
@@ -16,6 +17,10 @@ internal sealed class ServerOptions
         var portText = GetValue(args, "--port")
             ?? Environment.GetEnvironmentVariable("NETWORKADMIN_SERVER_PORT")
             ?? "5000";
+
+        var adminToken = GetValue(args, "--admin-token")
+            ?? Environment.GetEnvironmentVariable("NETWORKADMIN_ADMIN_TOKEN")
+            ?? string.Empty;
 
         if (!IPAddress.TryParse(host, out var address))
         {
@@ -31,7 +36,8 @@ internal sealed class ServerOptions
         return new ServerOptions
         {
             Host = address,
-            Port = port
+            Port = port,
+            AdminToken = adminToken
         };
     }
 

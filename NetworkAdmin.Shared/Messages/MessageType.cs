@@ -9,5 +9,8 @@ public enum MessageType
     PingRequest = 5,
     PingResult = 6,
     ScanRequest = 7,
-    ScanResult = 8
+    ScanResult = 8,
+    RemoteAdministrationCommand = 9,
+    RemoteAdministrationResult = 10,
+    RemoteAdministrationCancel = 11
 }

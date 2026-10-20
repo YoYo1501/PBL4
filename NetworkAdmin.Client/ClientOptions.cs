@@ -6,6 +6,7 @@ internal sealed class ClientOptions
     public int Port { get; init; } = 5000;
     public TimeSpan TelemetryInterval { get; init; } = TimeSpan.FromSeconds(2);
     public TimeSpan NetworkInfoInterval { get; init; } = TimeSpan.FromSeconds(15);
+    public string AdminToken { get; init; } = string.Empty;
 
     public static ClientOptions Load(string[] args)
     {
@@ -35,12 +36,17 @@ internal sealed class ClientOptions
             ? TimeSpan.FromSeconds(networkInfoIntervalSeconds)
             : TimeSpan.FromSeconds(15);
 
+        var adminToken = GetValue(args, "--admin-token")
+            ?? Environment.GetEnvironmentVariable("NETWORKADMIN_ADMIN_TOKEN")
+            ?? string.Empty;
+
         return new ClientOptions
         {
             Host = host,
             Port = port,
             TelemetryInterval = interval,
-            NetworkInfoInterval = networkInfoInterval
+            NetworkInfoInterval = networkInfoInterval,
+            AdminToken = adminToken
         };
     }
 

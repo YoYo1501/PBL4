@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using System.Text.Json;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Messages;
@@ -11,8 +12,11 @@ internal sealed class ClientCommandHandler
 {
     private readonly IPingService _pingService;
     private readonly ServerConnection _connection;
+    private readonly string _adminToken;
     private readonly SemaphoreSlim _pingSlots = new(4, 4);
     private readonly ConcurrentDictionary<Task, byte> _runningTasks = new();
+    private readonly ConcurrentDictionary<string, byte> _remoteCommandIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _remoteCancellations = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _scanSync = new();
     private INetworkScannerService? _scannerService;
     private Task _scanTask = Task.CompletedTask;
@@ -38,10 +42,11 @@ internal sealed class ClientCommandHandler
         }
     }
 
-    public ClientCommandHandler(IPingService pingService, ServerConnection connection)
+    public ClientCommandHandler(IPingService pingService, ServerConnection connection, string adminToken = "")
     {
         _pingService = pingService;
         _connection = connection;
+        _adminToken = adminToken;
     }
 
     public void SetScanner(INetworkScannerService scannerService)
@@ -80,8 +85,146 @@ internal sealed class ClientCommandHandler
             return;
         }
 
+        if (envelope.Type == MessageType.RemoteAdministrationCommand)
+        {
+            TrackTask(Task.Run(() => HandleRemoteAdministrationCommandAsync(envelope, cancellationToken), CancellationToken.None));
+            return;
+        }
+
+        if (envelope.Type == MessageType.RemoteAdministrationCancel)
+        {
+            HandleRemoteAdministrationCancel(envelope);
+            return;
+        }
+
         Console.WriteLine($"Ignoring unsupported server message: {envelope.Type}");
     }
+
+    private async Task HandleRemoteAdministrationCommandAsync(
+        MessageEnvelope envelope,
+        CancellationToken cancellationToken)
+    {
+        RemoteAdministrationCommandMessage? request = null;
+        CancellationTokenSource? commandCancellation = null;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(envelope.RequestId))
+            {
+                await SendRemoteResultAsync(envelope.RequestId, null,
+                    RemoteAdministrationCommandStatus.Rejected, "RequestId is required.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!_remoteCommandIds.TryAdd(envelope.RequestId, 0))
+            {
+                await SendRemoteResultAsync(envelope.RequestId, null,
+                    RemoteAdministrationCommandStatus.Rejected, "Duplicate remote command request.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            request = envelope.Data.Deserialize<RemoteAdministrationCommandMessage>(JsonOptions);
+            if (request is null || !IsAuthorized(request.AuthorizationToken))
+            {
+                await SendRemoteResultAsync(envelope.RequestId, request?.Command,
+                    RemoteAdministrationCommandStatus.Rejected, "Remote administration authorization failed.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (request.Command != RemoteAdministrationCommandType.GetAgentInfo)
+            {
+                await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                    RemoteAdministrationCommandStatus.Rejected, "Remote command is not permitted on this client.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            commandCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (!_remoteCancellations.TryAdd(envelope.RequestId, commandCancellation))
+            {
+                await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                    RemoteAdministrationCommandStatus.Rejected, "Remote command is already running.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                RemoteAdministrationCommandStatus.Accepted, string.Empty, commandCancellation.Token).ConfigureAwait(false);
+
+            var result = $"ClientId={_connection.ClientId}; ClientName={_connection.ClientName}; " +
+                         $"SessionId={_connection.SessionId}; MachineName={Environment.MachineName}; " +
+                         $"OS={Environment.OSVersion}";
+            await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                RemoteAdministrationCommandStatus.Completed, result, commandCancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+        {
+            await SendRemoteResultAsync(envelope.RequestId, request?.Command,
+                RemoteAdministrationCommandStatus.Failed, $"Command canceled: {ex.Message}", cancellationToken).ConfigureAwait(false);
+        }
+        catch (JsonException ex)
+        {
+            await SendRemoteResultAsync(envelope.RequestId, request?.Command,
+                RemoteAdministrationCommandStatus.Rejected, $"Malformed remote command: {ex.Message}", cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Remote command stopped: {ex.Message}");
+            await SendRemoteResultAsync(envelope.RequestId, request?.Command,
+                RemoteAdministrationCommandStatus.Failed, ex.Message, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (_remoteCancellations.TryRemove(envelope.RequestId, out var cancellation))
+                cancellation.Dispose();
+        }
+    }
+
+    private void HandleRemoteAdministrationCancel(MessageEnvelope envelope)
+    {
+        try
+        {
+            var request = envelope.Data.Deserialize<RemoteAdministrationCancelMessage>(JsonOptions);
+            if (request is not null && IsAuthorized(request.AuthorizationToken)
+                && _remoteCancellations.TryGetValue(envelope.RequestId, out var cancellation))
+            {
+                cancellation.Cancel();
+                Console.WriteLine($"Remote command canceled: {envelope.RequestId} ({request.Reason})");
+            }
+        }
+        catch (JsonException ex)
+        {
+            Console.WriteLine($"Malformed remote cancellation: {ex.Message}");
+        }
+    }
+
+    private async Task SendRemoteResultAsync(
+        string requestId,
+        RemoteAdministrationCommandType? command,
+        RemoteAdministrationCommandStatus status,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        await TrySendAsync(MessageType.RemoteAdministrationResult, requestId,
+            new RemoteAdministrationResultMessage
+            {
+                Command = command ?? default,
+                Status = status,
+                ClientId = _connection.ClientId,
+                Result = status == RemoteAdministrationCommandStatus.Completed ? message : string.Empty,
+                ErrorMessage = status == RemoteAdministrationCommandStatus.Completed ? string.Empty : message,
+                TimestampUtc = DateTime.UtcNow
+            }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool IsAuthorized(string token)
+    {
+        if (string.IsNullOrEmpty(_adminToken) || string.IsNullOrEmpty(token))
+            return false;
+
+        var expected = System.Text.Encoding.UTF8.GetBytes(_adminToken);
+        var actual = System.Text.Encoding.UTF8.GetBytes(token);
+        return CryptographicOperations.FixedTimeEquals(expected, actual);
+    }
+
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private async Task HandlePingCommandAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
     {

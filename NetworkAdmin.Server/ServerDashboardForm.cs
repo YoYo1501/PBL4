@@ -39,6 +39,8 @@ internal sealed class ServerDashboardForm : Form
     private readonly ScanView _scanner = new(true);
     private readonly PingView _dashboardPing = new(false);
     private readonly PingView _pingPage = new(true);
+    private readonly Button _agentInfoButton = DashboardTheme.Button("Get Agent Info");
+    private readonly Label _agentInfoStatus = DashboardTheme.Label("No remote command executed for this session.", 9, color: DashboardTheme.Muted);
     private readonly DataGridView _clients = DashboardTheme.Grid(("Status", "Status", 80), ("Hostname", "Hostname", 160),
         ("IPv4", "IPv4", 115), ("MAC", "MAC", 140), ("CPU", "CPU", 60), ("RAM", "RAM", 60), ("LastSeen", "Last Seen", 140));
     private readonly DataGridView _interfaces = DashboardTheme.Grid(("Name", "Interface", 110), ("IpAddress", "IPv4", 105),
@@ -63,6 +65,7 @@ internal sealed class ServerDashboardForm : Form
     private bool _closed;
     private Task? _pingTask;
     private Task? _scanTask;
+    private Task? _agentInfoTask;
 
     public ServerDashboardForm(ServerRuntime runtime)
     {
@@ -126,6 +129,7 @@ internal sealed class ServerDashboardForm : Form
         _dashboardPing.PingButton.Click += (_, _) => _pingTask = PingAsync();
         _pingPage.PingButton.Click += (_, _) => _pingTask = PingAsync();
         _scanner.ScanButton.Click += (_, _) => _scanTask = ScanAsync();
+        _agentInfoButton.Click += (_, _) => _agentInfoTask = GetAgentInfoAsync();
         _dashboardScan.ScanButton.Click += (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(_scanner.SubnetInput.Text)) { Navigate("IP Scanner"); _scanner.SubnetInput.Focus(); }
@@ -225,11 +229,19 @@ internal sealed class ServerDashboardForm : Form
 
     private Control BuildClients()
     {
-        var page = DashboardTheme.Rows(-100, 280, 190);
+        var page = DashboardTheme.Rows(-100, 280, 190, 78);
         var fleet = new DashboardCard("Managed Stations / Select a row to manage that session"); fleet.Body.Controls.Add(_clients);
         page.Controls.Add(fleet, 0, 0); page.Controls.Add(_clientsDetail, 0, 1);
         var adapters = new DashboardCard("All Reported Interfaces / Physical and virtual adapters"); adapters.Body.Controls.Add(_interfaces);
         page.Controls.Add(adapters, 0, 2);
+        var remote = new DashboardCard("Remote Administration / Read-only command");
+        var remoteRow = DashboardTheme.Table(2, 1);
+        remoteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+        remoteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        remoteRow.Controls.Add(_agentInfoButton, 0, 0);
+        remoteRow.Controls.Add(_agentInfoStatus, 1, 0);
+        remote.Body.Controls.Add(remoteRow);
+        page.Controls.Add(remote, 0, 3);
         return page;
     }
     private Control BuildSettings()
@@ -365,6 +377,10 @@ internal sealed class ServerDashboardForm : Form
         var enabled = c?.Connected == true && _runtime.IsRunning && !_closing;
         _dashboardPing.SetBusy(enabled && !state.PingPending, state.PingPending); _pingPage.SetBusy(enabled && !state.PingPending, state.PingPending);
         _scanner.SetAgent(c, enabled && !state.ScanPending, state.ScanPending); _dashboardScan.SetAgent(c, enabled && !state.ScanPending, state.ScanPending);
+        _agentInfoButton.Enabled = enabled && !state.RemoteInfoPending;
+        _agentInfoButton.Text = state.RemoteInfoPending ? "Reading..." : "Get Agent Info";
+        _agentInfoStatus.Text = state.RemoteInfoStatus;
+        _agentInfoStatus.ForeColor = state.RemoteInfoError ? DashboardTheme.Red : DashboardTheme.Muted;
         var key = c?.SessionId + string.Join(";", c?.Interfaces ?? []);
         if (_interfaceKey != key)
         {
@@ -483,6 +499,40 @@ internal sealed class ServerDashboardForm : Form
             if (!_closing) RefreshState();
         }
     }
+    private async Task GetAgentInfoAsync()
+    {
+        var c = Selected;
+        if (c?.Connected != true) return;
+        var state = CommandsFor(c.ClientId);
+        if (state.RemoteInfoPending) return;
+        var sessionId = c.SessionId;
+        state.RemoteInfoPending = true;
+        state.RemoteInfoError = false;
+        state.RemoteInfoStatus = $"Requesting information from {c.Hostname}...";
+        RenderSelection();
+        try
+        {
+            var result = await _runtime.GetAgentInfoAsync(c.ClientId, _lifetime.Token);
+            if (_closing || !IsCurrentSession(c.ClientId, sessionId, state)) return;
+            state.RemoteInfoError = result.Status is not NetworkAdmin.Shared.Messages.RemoteAdministrationCommandStatus.Completed;
+            state.RemoteInfoStatus = result.Status == NetworkAdmin.Shared.Messages.RemoteAdministrationCommandStatus.Completed
+                ? result.Result
+                : $"{result.Status}: {result.ErrorMessage}";
+        }
+        catch (Exception ex)
+        {
+            if (!_closing && IsCurrentSession(c.ClientId, sessionId, state))
+            {
+                state.RemoteInfoError = true;
+                state.RemoteInfoStatus = $"Remote command failed: {ex.Message}";
+            }
+        }
+        finally
+        {
+            if (state.SessionId == sessionId) state.RemoteInfoPending = false;
+            if (!_closing) RefreshState();
+        }
+    }
     private bool IsCurrentSession(string clientId, string sessionId, SessionCommandState state) =>
         state.SessionId == sessionId && _runtime.GetClients().Any(c =>
             string.Equals(c.ClientId, clientId, StringComparison.OrdinalIgnoreCase) && c.SessionId == sessionId && c.Connected);
@@ -495,7 +545,8 @@ internal sealed class ServerDashboardForm : Form
         try
         {
             await _lifetime.CancelAsync(); await _runtime.StopAsync();
-            await Task.WhenAll(_pingTask ?? Task.CompletedTask, _scanTask ?? Task.CompletedTask);
+            await Task.WhenAll(_pingTask ?? Task.CompletedTask, _scanTask ?? Task.CompletedTask,
+                _agentInfoTask ?? Task.CompletedTask);
         }
         catch (Exception ex) { Console.WriteLine($"Server shutdown: {ex.Message}"); }
         finally { _closed = true; Close(); }

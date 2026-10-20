@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "NetworkAdmin.Client": {
+      "commandName": "Project",
+      "commandLineArgs": "--host 127.0.0.1 --port 5000",
+      "environmentVariables": {
+        "NETWORKADMIN_ADMIN_TOKEN": "test-token-123"
+      }
+    }
+  }
+}
