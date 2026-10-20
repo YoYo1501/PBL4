@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using NetworkAdmin.Shared.Models;
+using NetworkAdmin.Shared.Protocol;
 using NetworkAdminTool.Interfaces;
 using NetworkAdminTool.Models;
 
@@ -52,7 +54,8 @@ public class NetworkInfoService : INetworkInfoService
                 Subnet = GetSubnetPrefix(GetIpv4Address(ni))
             })
             .Where(x => !string.IsNullOrWhiteSpace(x.IpAddress))
-            .OrderByDescending(x => !string.IsNullOrWhiteSpace(x.Gateway))
+            .OrderBy(x => NetworkInterfacePolicy.IsVirtual(x.Name, x.Description))
+            .ThenByDescending(x => NetworkInterfacePolicy.HasUsableIpv4(x.Gateway))
             .ThenBy(x => x.Name)
             .ToList();
     }
@@ -64,15 +67,8 @@ public class NetworkInfoService : INetworkInfoService
 
     public string GetDefaultGateway(string? interfaceName)
     {
-        var interfaces = GetActiveInterfaces();
-        if (!string.IsNullOrWhiteSpace(interfaceName))
-        {
-            interfaces = interfaces.Where(ni => MatchesInterfaceName(ni, interfaceName));
-        }
-
-        return interfaces
-            .Select(GetDefaultGatewayAddress)
-            .FirstOrDefault(gw => !string.IsNullOrWhiteSpace(gw)) ?? string.Empty;
+        var selected = string.IsNullOrWhiteSpace(interfaceName) ? GetPrimaryInterface() : FindInterface(interfaceName);
+        return selected is null ? string.Empty : GetDefaultGatewayAddress(selected);
     }
 
     public NetworkDevice GetDeviceInfo(string ipAddress)
@@ -126,7 +122,7 @@ public class NetworkInfoService : INetworkInfoService
         if (string.IsNullOrWhiteSpace(ipAddress)) return new();
 
         var subnet = GetSubnetPrefix(ipAddress);
-        if (string.IsNullOrWhiteSpace(subnet) || !TryParseCidrSubnet(subnet, out var hostIps)) return new();
+        if (string.IsNullOrWhiteSpace(subnet) || !ScanSubnet.TryGetHostRange(subnet, out var hostIps)) return new();
 
         var ipsToScan = hostIps.ToList();
         var onlineIps = new ConcurrentBag<string>();
@@ -199,7 +195,9 @@ public class NetworkInfoService : INetworkInfoService
 
     private static NetworkInterface? GetPrimaryInterface() =>
         GetActiveInterfaces()
-            .OrderByDescending(ni => ni.GetIPProperties().GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork))
+            .Where(ni => NetworkInterfacePolicy.HasUsableIpv4(GetIpv4Address(ni))
+                && !NetworkInterfacePolicy.IsVirtual(ni.Name, ni.Description))
+            .OrderByDescending(ni => NetworkInterfacePolicy.HasUsableIpv4(GetDefaultGatewayAddress(ni)))
             .ThenByDescending(ni => ni.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211)
             .FirstOrDefault();
 
@@ -242,38 +240,6 @@ public class NetworkInfoService : INetworkInfoService
 
     private static int GetPrefixLength(IPAddress subnetMask) =>
         System.Numerics.BitOperations.PopCount(ParseIpToUInt32(subnetMask));
-
-    private static bool TryParseCidrSubnet(string subnetWithPrefix, out IEnumerable<string> hosts)
-    {
-        hosts = Enumerable.Empty<string>();
-        var parts = subnetWithPrefix.Split('/', StringSplitOptions.TrimEntries);
-        if (parts.Length != 2 ||
-            !IPAddress.TryParse(parts[0], out var netAddr) ||
-            netAddr.AddressFamily != AddressFamily.InterNetwork ||
-            !int.TryParse(parts[1], out var prefix) ||
-            prefix is < 1 or > 30)
-        {
-            return false;
-        }
-
-        var netUint = ParseIpToUInt32(netAddr);
-        var mask = uint.MaxValue << (32 - prefix);
-        var network = netUint & mask;
-        var broadcast = network | ~mask;
-
-        if (broadcast <= network + 1) return false;
-
-        hosts = EnumerateIpRange(network + 1, broadcast - 1);
-        return true;
-    }
-
-    private static IEnumerable<string> EnumerateIpRange(uint firstHost, uint lastHost)
-    {
-        for (var current = firstHost; current <= lastHost; current++)
-        {
-            yield return UInt32ToIp(current).ToString();
-        }
-    }
 
     private static uint ParseIpToUInt32(IPAddress ip) =>
         BinaryPrimitives.ReadUInt32BigEndian(ip.GetAddressBytes());

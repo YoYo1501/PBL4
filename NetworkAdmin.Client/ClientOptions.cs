@@ -5,7 +5,6 @@ internal sealed class ClientOptions
     public string Host { get; init; } = "127.0.0.1";
     public int Port { get; init; } = 5000;
     public TimeSpan TelemetryInterval { get; init; } = TimeSpan.FromSeconds(2);
-    public TimeSpan? Duration { get; init; }
 
     public static ClientOptions Load(string[] args)
     {
@@ -28,17 +27,11 @@ internal sealed class ClientOptions
             ? TimeSpan.FromSeconds(intervalSeconds)
             : TimeSpan.FromSeconds(2);
 
-        var durationText = GetValue(args, "--duration-seconds");
-        var duration = int.TryParse(durationText, out var durationSeconds) && durationSeconds > 0
-            ? TimeSpan.FromSeconds(durationSeconds)
-            : (TimeSpan?)null;
-
         return new ClientOptions
         {
             Host = host,
             Port = port,
-            TelemetryInterval = interval,
-            Duration = duration
+            TelemetryInterval = interval
         };
     }
 

@@ -11,14 +11,15 @@ namespace NetworkAdmin.Client;
 internal static class Program
 {
     [STAThread]
-    private static async Task Main(string[] args)
+    private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        var standalone = args.Contains("--standalone", StringComparer.OrdinalIgnoreCase);
         var options = ClientOptions.Load(args);
         using var host = Host.CreateDefaultBuilder(args)
             .ConfigureAppConfiguration((_, configuration) =>
             {
-                configuration.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+                configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "appsettings.json"), optional: true, reloadOnChange: true);
                 configuration.AddEnvironmentVariables();
             })
             .ConfigureServices((context, services) =>
@@ -50,11 +51,12 @@ internal static class Program
             })
             .Build();
 
-        await host.StartAsync().ConfigureAwait(false);
+        // Keep Application.Run on the STA entry thread even if host startup is asynchronous.
+        host.StartAsync().GetAwaiter().GetResult();
         var runtime = host.Services.GetRequiredService<ClientRuntime>();
-        runtime.Start();
+        if (!standalone) runtime.Start();
         Application.Run(host.Services.GetRequiredService<MainForm>());
-        await runtime.StopAsync().ConfigureAwait(false);
-        await host.StopAsync().ConfigureAwait(false);
+        runtime.StopAsync().GetAwaiter().GetResult();
+        host.StopAsync().GetAwaiter().GetResult();
     }
 }

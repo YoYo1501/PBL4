@@ -1,6 +1,4 @@
 ﻿using NetworkAdmin.Server.UI;
-using NetworkAdmin.Shared.Messages;
-using NetworkAdminTool.Models;
 using System.Runtime.InteropServices;
 
 namespace NetworkAdmin.Server;
@@ -46,21 +44,21 @@ internal sealed class ServerDashboardForm : Form
     private readonly DataGridView _interfaces = DashboardTheme.Grid(("Name", "Interface", 110), ("IpAddress", "IPv4", 105),
         ("MacAddress", "MAC", 130), ("Gateway", "Gateway", 105), ("Subnet", "Subnet", 110), ("Description", "Description", 180));
     private IReadOnlyList<ClientSnapshot> _snapshots = [];
-    private ScanResultMessage? _lastScan;
-    private PingResult? _lastPing;
-    private DateTime? _scanAt;
+    private readonly Dictionary<string, SessionCommandState> _commands = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SessionCommandState _emptyCommands = new();
+    private SessionCommandState CommandsFor(string? id)
+    {
+        if (id is null) return _emptyCommands;
+        if (!_commands.TryGetValue(id, out var state)) _commands[id] = state = new();
+        return state;
+    }
     private DateTime? _runningSince;
     private TimeSpan _uptimeValue;
-    private string _scanOrigin = "";
-    private string _scanMessage = "No scan completed. Scanned hosts are not automatically managed agents.";
-    private bool _scanError;
     private string? _selectedId;
-    private string? _prefillSession;
+    private string? _prefillKey;
     private string _selectorKey = "";
     private string _interfaceKey = "";
     private bool _updating;
-    private bool _scanning;
-    private bool _pinging;
     private bool _closing;
     private bool _closed;
     private Task? _pingTask;
@@ -111,7 +109,7 @@ internal sealed class ServerDashboardForm : Form
         _selector.SelectedIndexChanged += (_, _) =>
         {
             if (_updating) return;
-            _selectedId = (_selector.SelectedItem as ClientSnapshot)?.SessionId;
+            _selectedId = (_selector.SelectedItem as ClientSnapshot)?.ClientId;
             RenderSelection();
         };
         _clients.SelectionChanged += (_, _) =>
@@ -119,7 +117,7 @@ internal sealed class ServerDashboardForm : Form
             if (_updating || _clients.CurrentRow?.Tag is not string id) return;
             _selectedId = id;
             _updating = true;
-            _selector.SelectedItem = _selector.Items.Cast<ClientSnapshot>().FirstOrDefault(c => c.SessionId == id);
+            _selector.SelectedItem = _selector.Items.Cast<ClientSnapshot>().FirstOrDefault(c => string.Equals(c.ClientId, id, StringComparison.OrdinalIgnoreCase));
             _updating = false;
             RenderSelection();
         };
@@ -287,7 +285,7 @@ internal sealed class ServerDashboardForm : Form
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         e.DrawFocusRectangle();
     }
-    private ClientSnapshot? Selected => _snapshots.FirstOrDefault(c => c.SessionId == _selectedId);
+    private ClientSnapshot? Selected => _snapshots.FirstOrDefault(c => string.Equals(c.ClientId, _selectedId, StringComparison.OrdinalIgnoreCase));
 
     private void RefreshState()
     {
@@ -311,49 +309,62 @@ internal sealed class ServerDashboardForm : Form
         _clock.Text = DateTime.Now.ToString("hh:mm:ss tt"); _date.Text = DateTime.Now.ToString("ddd, MMM d, yyyy");
         _managed.UpdateValue(_knownAgents.Count.ToString(), "Known agents this server run");
         _online.UpdateValue(online.ToString(), "Currently connected agents");
-        _hosts.UpdateValue(_lastScan?.Devices.Count.ToString() ?? "--", _scanAt is DateTime at ? $"Last scan: {at:t}" : "No scan completed");
-        _pingAverage.UpdateValue(_lastPing?.AverageResponseTimeMs is double ms ? $"{ms:0.#} ms" : "--", _lastPing is null ? "No ping completed" : $"Target: {_lastPing.Host}");
         _settings.Text = $"Runtime status: {_runtime.Status}\nListening address: {_runtime.Endpoint}\n\n" +
             "Configuration is read at startup. Restart with --host <address> --port <port> to change it.\n" +
             "Use --host 0.0.0.0 to listen on all IPv4 interfaces.\n\n" +
             "Dashboard refresh: 500 ms\nHistory: last 60 received samples per session, in memory\n" +
-            "Stale telemetry threshold: 10 seconds\nRemote scanner: IPv4 unicast /24 through /30\n\n" +
+            "Stale telemetry threshold: 10 seconds\nRemote scanner: IPv4 unicast /23 through /30 (510 hosts maximum)\n\n" +
             "No connection settings are changed by this page.";
         _updating = true;
         try
         {
-            if (_selectedId is null) _selectedId = _snapshots.FirstOrDefault(c => c.Connected)?.SessionId;
+            if (_selectedId is null) _selectedId = _snapshots.FirstOrDefault(c => c.Connected)?.ClientId;
+            foreach (var c in _snapshots)
+            {
+                var state = CommandsFor(c.ClientId);
+                if (state.SessionId is not null && state.SessionId != c.SessionId)
+                {
+                    if (state.PingPending) state.PingStatus = "Previous session Ping interrupted after reconnect.";
+                    if (state.ScanPending) state.ScanStatus = "Previous session scan interrupted after reconnect.";
+                    state.PingPending = false;
+                    state.ScanPending = false;
+                }
+                state.SessionId = c.SessionId;
+            }
             var key = string.Join(";", _snapshots.Select(c => c.ToString()));
             if (key != _selectorKey)
             {
                 _selectorKey = key; _selector.Items.Clear(); _selector.Items.AddRange(_snapshots.Cast<object>().ToArray());
-                _selector.SelectedItem = _selector.Items.Cast<ClientSnapshot>().FirstOrDefault(c => c.SessionId == _selectedId);
+                _selector.SelectedItem = _selector.Items.Cast<ClientSnapshot>().FirstOrDefault(c => string.Equals(c.ClientId, _selectedId, StringComparison.OrdinalIgnoreCase));
             }
-            var ids = _snapshots.Select(c => c.SessionId).ToHashSet();
+            var ids = _snapshots.Select(c => c.ClientId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var id in _commands.Keys.Where(id => !ids.Contains(id)).ToArray()) _commands.Remove(id);
             foreach (var row in _clients.Rows.Cast<DataGridViewRow>().Where(r => !ids.Contains((string)r.Tag!)).ToArray()) _clients.Rows.Remove(row);
             foreach (var c in _snapshots)
             {
-                var row = _clients.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (string?)r.Tag == c.SessionId);
-                if (row is null) { row = _clients.Rows[_clients.Rows.Add()]; row.Tag = c.SessionId; }
+                var row = _clients.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => string.Equals((string?)r.Tag, c.ClientId, StringComparison.OrdinalIgnoreCase));
+                if (row is null) { row = _clients.Rows[_clients.Rows.Add()]; row.Tag = c.ClientId; }
                 row.SetValues(c.Connected ? "Online" : "Offline", c.Hostname, c.IpAddress, DashboardTheme.Value(c.MacAddress),
-                    c.Connected ? DashboardTheme.Percent(c.Cpu) : "--", c.Connected ? DashboardTheme.Percent(c.Ram) : "--", c.LastSeen.ToLocalTime().ToString("G"));
+                    c.HasFreshTelemetry(DateTime.UtcNow) ? DashboardTheme.Percent(c.Cpu) : "--",
+                    c.HasFreshTelemetry(DateTime.UtcNow) ? DashboardTheme.Percent(c.Ram) : "--", c.LastSeen.ToLocalTime().ToString("G"));
                 row.Cells[0].Style.ForeColor = c.Connected ? DashboardTheme.Green : DashboardTheme.Red;
-                row.Selected = c.SessionId == _selectedId;
+                row.Selected = string.Equals(c.ClientId, _selectedId, StringComparison.OrdinalIgnoreCase);
             }
         }
         finally { _updating = false; }
-        RenderSelection(); RenderScan();
+        RenderSelection();
     }
 
     private void RenderSelection()
     {
         var c = Selected;
+        var state = CommandsFor(c?.ClientId);
         _dashboardClient.UpdateClient(c); _clientsDetail.UpdateClient(c);
-        var samples = _history.For(c?.SessionId);
+        var samples = _history.For(c?.ClientId);
         _dashboardTelemetry.UpdateClient(c, samples); _monitoringTelemetry.UpdateClient(c, samples);
         var enabled = c?.Connected == true && _runtime.IsRunning && !_closing;
-        _dashboardPing.SetBusy(enabled && !_pinging, _pinging); _pingPage.SetBusy(enabled && !_pinging, _pinging);
-        _scanner.SetAgent(c, enabled && !_scanning, _scanning); _dashboardScan.SetAgent(c, enabled && !_scanning, _scanning);
+        _dashboardPing.SetBusy(enabled && !state.PingPending, state.PingPending); _pingPage.SetBusy(enabled && !state.PingPending, state.PingPending);
+        _scanner.SetAgent(c, enabled && !state.ScanPending, state.ScanPending); _dashboardScan.SetAgent(c, enabled && !state.ScanPending, state.ScanPending);
         var key = c?.SessionId + string.Join(";", c?.Interfaces ?? []);
         if (_interfaceKey != key)
         {
@@ -361,18 +372,26 @@ internal sealed class ServerDashboardForm : Form
             foreach (var nic in c?.Interfaces ?? []) _interfaces.Rows.Add(nic.Name, nic.IpAddress, nic.MacAddress, nic.Gateway, nic.Subnet, nic.Description);
             _interfaces.ClearSelection();
         }
-        if (c?.PrimaryInterface is { } primary && _prefillSession != c.SessionId)
+        var prefillKey = c is null ? "" : $"{c.SessionId}|{c.PrimaryInterface?.Subnet}";
+        if (_prefillKey != prefillKey)
         {
-            _prefillSession = c.SessionId; _scanner.SubnetInput.Text = primary.Subnet;
+            _prefillKey = prefillKey; _scanner.SubnetInput.Text = c?.PrimaryInterface?.Subnet ?? "";
         }
+        _hosts.UpdateValue(state.Scan?.Devices.Count.ToString() ?? "--", state.ScanAt is DateTime at ? $"Selected session: {at:t}" : "No scan for selected session");
+        _pingAverage.UpdateValue(state.Ping?.AverageResponseTimeMs is double ms ? $"{ms:0.#} ms" : "--",
+            state.Ping is null ? "No ping for selected session" : $"Target: {state.Ping.Host}");
+        _dashboardPing.SetResult(state.Ping); _pingPage.SetResult(state.Ping);
+        PingStatus(state.PingStatus, state.PingError);
+        RenderScan();
     }
     private void RenderScan()
     {
-        var rows = _lastScan is null ? Array.Empty<ScanHostSnapshot>() : ServerRuntime.MatchScan(_lastScan, _snapshots);
-        var summary = _scanMessage;
-        if (_lastScan is not null && !_scanning && !_scanError)
-            summary = $"{rows.Count} hosts found  |  {rows.Count(r => r.ManagedClient == "Yes")} managed hosts  |  Completed {_scanAt:t}\n{_scanOrigin}";
-        _dashboardScan.SetResults(rows, summary, _scanError); _scanner.SetResults(rows, summary, _scanError);
+        var state = CommandsFor(Selected?.ClientId);
+        var rows = state.Scan is null ? Array.Empty<ScanHostSnapshot>() : ServerRuntime.MatchScan(state.Scan, _snapshots);
+        var summary = state.ScanStatus;
+        if (state.Scan is not null && !state.ScanError)
+            summary = $"{rows.Count} hosts found  |  {rows.Count(r => r.ManagedClient == "Yes")} managed hosts  |  Completed {state.ScanAt:t}\n{state.ScanOrigin}";
+        _dashboardScan.SetResults(rows, summary, state.ScanError); _scanner.SetResults(rows, summary, state.ScanError);
     }
     private void PingStatus(string status, bool error = false)
     {
@@ -381,42 +400,66 @@ internal sealed class ServerDashboardForm : Form
     private async Task PingAsync()
     {
         var c = Selected;
-        if (c?.Connected != true || _pinging) return;
-        _pinging = true; RenderSelection();
+        if (c?.Connected != true) return;
+        var state = CommandsFor(c.ClientId);
+        if (state.PingPending) return;
+        var sessionId = c.SessionId;
+        state.PingPending = true;
         var target = _pingPage.TargetInput.Text.Trim();
         var origin = $"Agent: {c.Hostname} ({c.IpAddress}) / Session {c.SessionId[..Math.Min(8, c.SessionId.Length)]}";
-        PingStatus($"Pinging {target}... Previous completed results remain visible.\n{origin}");
+        state.PingError = false;
+        state.PingStatus = $"Pinging {target}...\n{origin}";
+        RenderSelection();
         try
         {
-            var result = await _runtime.PingAsync(c.SessionId, target, _lifetime.Token);
-            if (_closing) return;
-            _lastPing = result; _dashboardPing.SetResult(result); _pingPage.SetResult(result);
-            PingStatus($"{result.StatusMessage} | Target: {result.Host} | {DateTime.Now:T}\n{origin}", !result.Success);
+            var result = await _runtime.PingAsync(sessionId, target, _lifetime.Token);
+            if (_closing || !IsCurrentSession(c.ClientId, sessionId, state)) return;
+            state.Ping = result; state.PingError = !result.Success;
+            state.PingStatus = $"{result.StatusMessage} | Target: {result.Host} | {DateTime.Now:T}\n{origin}";
         }
-        catch (Exception ex) { if (!_closing) PingStatus($"Ping failed: {ex.Message} (previous results retained)\n{origin}", true); }
-        finally { _pinging = false; if (!_closing) RefreshState(); }
+        catch (Exception ex)
+        {
+            if (!_closing && IsCurrentSession(c.ClientId, sessionId, state))
+            { state.PingStatus = $"Ping failed: {ex.Message}\n{origin}"; state.PingError = true; }
+        }
+        finally
+        {
+            if (state.SessionId == sessionId) state.PingPending = false;
+            if (!_closing) RefreshState();
+        }
     }
     private async Task ScanAsync()
     {
         var c = Selected;
-        if (c?.Connected != true || _scanning) return;
-        _scanning = true; _scanError = false; RenderSelection();
+        if (c?.Connected != true) return;
+        var state = CommandsFor(c.ClientId);
+        if (state.ScanPending) return;
+        var sessionId = c.SessionId;
+        state.ScanPending = true; state.ScanError = false;
         var subnet = _scanner.SubnetInput.Text;
-        var origin = $"Agent: {c.Hostname} ({c.IpAddress}) | Subnet: {subnet}";
-        _scanMessage = $"Scanning... Previous completed results remain visible.\n{origin}"; RenderScan();
+        var origin = $"Agent: {c.Hostname} / Session {c.SessionId[..Math.Min(8, c.SessionId.Length)]} | Subnet: {subnet}";
+        state.ScanStatus = $"Scanning...\n{origin}"; RenderSelection();
         try
         {
-            var result = await _runtime.ScanAsync(c.SessionId, subnet, _lifetime.Token);
-            if (_closing) return;
+            var result = await _runtime.ScanAsync(sessionId, subnet, _lifetime.Token);
+            if (_closing || !IsCurrentSession(c.ClientId, sessionId, state)) return;
             if (!result.Success) throw new InvalidOperationException(result.ErrorMessage);
-            _lastScan = result; _scanAt = DateTime.Now; _scanOrigin = origin;
+            state.Scan = result; state.ScanAt = DateTime.Now; state.ScanOrigin = origin;
         }
         catch (Exception ex)
         {
-            if (!_closing) { _scanError = true; _scanMessage = $"Scan failed: {ex.Message}\nPrevious completed results retained."; }
+            if (!_closing && IsCurrentSession(c.ClientId, sessionId, state))
+            { state.ScanError = true; state.ScanStatus = $"Scan failed: {ex.Message}\n{origin}"; }
         }
-        finally { _scanning = false; if (!_closing) RefreshState(); }
+        finally
+        {
+            if (state.SessionId == sessionId) state.ScanPending = false;
+            if (!_closing) RefreshState();
+        }
     }
+    private bool IsCurrentSession(string clientId, string sessionId, SessionCommandState state) =>
+        state.SessionId == sessionId && _runtime.GetClients().Any(c =>
+            string.Equals(c.ClientId, clientId, StringComparison.OrdinalIgnoreCase) && c.SessionId == sessionId && c.Connected);
     private async void CloseAsync(object? sender, FormClosingEventArgs e)
     {
         if (_closed) return;

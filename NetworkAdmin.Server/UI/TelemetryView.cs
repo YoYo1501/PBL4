@@ -23,7 +23,7 @@ internal sealed class TelemetryView : DashboardCard
     }
     public void UpdateClient(ClientSnapshot? client, IReadOnlyList<TelemetryPoint> points)
     {
-        var stale = client?.Connected != true || client.LastTelemetryAt is null || DateTime.UtcNow - client.LastTelemetryAt > TimeSpan.FromSeconds(10);
+        var stale = client?.HasFreshTelemetry(DateTime.UtcNow) != true;
         Heading.Text = "System Monitoring" + (client is null ? "" : stale ? " / STALE DATA" : " / Live");
         _status.Text = client is null ? "Select a managed client to start monitoring."
             : !client.Connected ? $"OFFLINE - {client.Hostname} - last received values"

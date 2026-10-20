@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
+using NetworkAdmin.Shared.Protocol;
 using System.Text.RegularExpressions;
 using NetworkAdminTool.Interfaces;
 using NetworkAdminTool.Models;
@@ -37,21 +36,17 @@ namespace NetworkAdminTool.Services
             CancellationToken cancellationToken = default,
             IProgress<NetworkScanProgress>? progress = null)
         {
-            if (!TryGetHostRange(subnet, out var hostAddresses))
+            if (!ScanSubnet.TryGetHostRange(subnet, out var hostAddresses))
             {
-                return new List<NetworkDevice>();
+                throw new ArgumentException(ScanSubnet.Help, nameof(subnet));
             }
 
             var ipsToScan = hostAddresses.ToList();
-            if (ipsToScan.Count == 0)
-            {
-                return new List<NetworkDevice>();
-            }
 
             // Pass 1 warms ARP/neighbor cache to reduce first-probe misses.
             await ExecutePingPassAsync(ipsToScan, WarmUpTimeoutMs, WarmUpRetryCount, cancellationToken, collectResult: false);
 
-            var effectiveTimeoutMs = Math.Max(timeoutMs, MinimumDiscoveryTimeoutMs);
+            var effectiveTimeoutMs = Math.Clamp(timeoutMs, MinimumDiscoveryTimeoutMs, 1000);
             var pingResults = await ExecutePingPassAsync(
                 ipsToScan,
                 effectiveTimeoutMs,
@@ -60,7 +55,7 @@ namespace NetworkAdminTool.Services
                 collectResult: true,
                 progress);
 
-            var arpEntries = GetArpEntries();
+            var arpEntries = await GetArpEntriesAsync(cancellationToken).ConfigureAwait(false);
             var onlineDevices = new List<NetworkDevice>();
 
             foreach (var ip in ipsToScan)
@@ -96,33 +91,8 @@ namespace NetworkAdminTool.Services
                 : _networkInfoService.GetLocalIpAddress(interfaceName);
 
             var subnet = _networkInfoService.GetSubnetPrefix(localIp);
-            return string.IsNullOrWhiteSpace(subnet)
-                ? new List<NetworkDevice>()
-                : ScanNetwork(subnet, interfaceName: interfaceName, cancellationToken: cancellationToken);
-        }
-
-        private static bool TryGetHostRange(string subnet, out IEnumerable<string> hosts)
-        {
-            hosts = Enumerable.Empty<string>();
-
-            if (string.IsNullOrWhiteSpace(subnet))
-            {
-                return false;
-            }
-
-            if (TryParseLegacySubnet(subnet, out var legacyHosts))
-            {
-                hosts = legacyHosts;
-                return true;
-            }
-
-            if (TryParseCidrSubnet(subnet, out var cidrHosts))
-            {
-                hosts = cidrHosts;
-                return true;
-            }
-
-            return false;
+            if (string.IsNullOrWhiteSpace(subnet)) throw new InvalidOperationException("No IPv4 subnet is available on the selected interface.");
+            return ScanNetwork(subnet, interfaceName: interfaceName, cancellationToken: cancellationToken);
         }
 
         private async Task<Dictionary<string, PingResult>> ExecutePingPassAsync(
@@ -158,6 +128,7 @@ namespace NetworkAdminTool.Services
                             }
                         }
                     }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
                     catch
                     {
                         // Ignore per-host ping failures to keep the scan resilient.
@@ -186,92 +157,6 @@ namespace NetworkAdminTool.Services
             return results.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase);
         }
 
-        private static bool TryParseLegacySubnet(string subnet, out IEnumerable<string> hosts)
-        {
-            hosts = Enumerable.Empty<string>();
-            var parts = subnet.Split('.', StringSplitOptions.TrimEntries);
-            if (parts.Length != 3)
-            {
-                return false;
-            }
-
-            var octets = new int[3];
-            for (var i = 0; i < 3; i++)
-            {
-                if (!int.TryParse(parts[i], out octets[i]) || octets[i] < 0 || octets[i] > 255)
-                {
-                    return false;
-                }
-            }
-
-            if (octets[0] is 0 or 127 or >= 224) return false;
-
-            hosts = Enumerable.Range(1, 254).Select(host => $"{octets[0]}.{octets[1]}.{octets[2]}.{host}");
-            return true;
-        }
-
-        private static bool TryParseCidrSubnet(string subnet, out IEnumerable<string> hosts)
-        {
-            hosts = Enumerable.Empty<string>();
-            var parts = subnet.Split('/', StringSplitOptions.TrimEntries);
-            if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var baseAddress) || baseAddress.AddressFamily != AddressFamily.InterNetwork)
-            {
-                return false;
-            }
-
-            if (!int.TryParse(parts[1], out var prefixLength) || prefixLength < 1 || prefixLength > 30)
-            {
-                return false;
-            }
-
-            var baseIpValue = ToUInt32(baseAddress);
-            var mask = prefixLength == 0 ? 0U : uint.MaxValue << (32 - prefixLength);
-            var network = baseIpValue & mask;
-            var broadcast = network | ~mask;
-            if ((network >> 24) == 0 || (broadcast >> 24) >= 224 ||
-                (network <= 0x7FFFFFFF && broadcast >= 0x7F000000)) return false;
-
-            if (broadcast <= network + 1)
-            {
-                return false;
-            }
-
-            var firstHost = network + 1;
-            var lastHost = broadcast - 1;
-            hosts = EnumerateIpRange(firstHost, lastHost);
-            return true;
-        }
-
-        private static IEnumerable<string> EnumerateIpRange(uint firstHost, uint lastHost)
-        {
-            for (var current = firstHost; current <= lastHost; current++)
-            {
-                yield return ToIpString(current);
-            }
-        }
-
-        private static uint ToUInt32(IPAddress ipAddress)
-        {
-            var bytes = ipAddress.GetAddressBytes();
-            if (BitConverter.IsLittleEndian)
-            {
-                Array.Reverse(bytes);
-            }
-
-            return BitConverter.ToUInt32(bytes, 0);
-        }
-
-        private static string ToIpString(uint ipValue)
-        {
-            var bytes = BitConverter.GetBytes(ipValue);
-            if (BitConverter.IsLittleEndian)
-            {
-                Array.Reverse(bytes);
-            }
-
-            return new IPAddress(bytes).ToString();
-        }
-
         private static int GetIpValue(string ipAddress)
         {
             var parts = ipAddress.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -294,7 +179,7 @@ namespace NetworkAdminTool.Services
             return value;
         }
 
-        private static Dictionary<string, string> GetArpEntries()
+        private static async Task<Dictionary<string, string>> GetArpEntriesAsync(CancellationToken cancellationToken)
         {
             var entries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -312,9 +197,21 @@ namespace NetworkAdminTool.Services
                 };
 
                 process.Start();
-                var output = process.StandardOutput.ReadToEnd();
-                var error = process.StandardError.ReadToEnd();
-                process.WaitForExit(2000);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                string output, error;
+                try
+                {
+                    var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+                    var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+                    await Task.WhenAll(outputTask, errorTask, process.WaitForExitAsync(timeout.Token)).ConfigureAwait(false);
+                    output = await outputTask.ConfigureAwait(false);
+                    error = await errorTask.ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (!process.HasExited) process.Kill();
+                }
 
                 if (process.ExitCode != 0 && string.IsNullOrWhiteSpace(output) && !string.IsNullOrWhiteSpace(error))
                 {
@@ -333,6 +230,7 @@ namespace NetworkAdminTool.Services
                     }
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch
             {
                 // In some environments ARP may not be available or may be blocked.

@@ -51,6 +51,7 @@ internal sealed class PingView : DashboardCard
     public TextBox TargetInput { get; } = DashboardTheme.InputBox("IP address or hostname");
     public Button PingButton { get; } = DashboardTheme.Button("Ping (4 requests)");
     private readonly Label[] _metrics = new Label[5];
+    private PingResult? _shownResult;
     private readonly Label _status = DashboardTheme.Label("Select an agent, enter a target, then Ping.", 9, color: DashboardTheme.Muted);
     private readonly DataGridView _attempts = DashboardTheme.Grid(("Number", "#", 35), ("Status", "Status", 180), ("ResponseTime", "Response Time", 100));
     public PingView(bool dedicated) : base(dedicated ? "Ping Tool / Remote ICMP Diagnostics" : "Recent Ping Results")
@@ -84,8 +85,16 @@ internal sealed class PingView : DashboardCard
     {
         _status.Text = text; _status.ForeColor = error ? DashboardTheme.Red : DashboardTheme.Muted;
     }
-    public void SetResult(PingResult result)
+    public void SetResult(PingResult? result)
     {
+        if (ReferenceEquals(_shownResult, result)) return;
+        _shownResult = result;
+        if (result is null)
+        {
+            foreach (var metric in _metrics) metric.Text = "--";
+            _attempts.Rows.Clear();
+            return;
+        }
         var reported = result.Sent > 0;
         string[] values = [reported ? result.Sent.ToString() : "--", reported ? result.Received.ToString() : "--",
             reported ? result.Lost.ToString() : "--", reported ? $"{result.PacketLossPercent:0.#}%" : "--",
