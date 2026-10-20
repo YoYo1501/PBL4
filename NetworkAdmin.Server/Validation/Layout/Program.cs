@@ -2,6 +2,8 @@
 using System.Reflection;
 using NetworkAdmin.Server;
 using NetworkAdmin.Server.UI;
+using NetworkAdmin.Shared.Messages;
+using NetworkAdminTool.Models;
 
 internal static class LayoutValidation
 {
@@ -11,6 +13,7 @@ internal static class LayoutValidation
         var baseline = args.Contains("--96");
         Application.SetHighDpiMode(baseline ? HighDpiMode.DpiUnaware : HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
+        ValidateSessionSelection();
         var output = Path.GetFullPath("artifacts/layout");
         Directory.CreateDirectory(output);
         var sizes = baseline ? new[] { new Size(1366, 768), new Size(1920, 1080) }
@@ -48,6 +51,63 @@ internal static class LayoutValidation
             Console.WriteLine($"PASS {size.Width}x{size.Height}, DPI={form.DeviceDpi}: title, navigation and card bounds. Render: {path}");
         }
     }
+    private static void ValidateSessionSelection()
+    {
+        using var form = new ServerDashboardForm(new ServerRuntime(new ServerOptions()));
+        _ = form.Handle;
+        var now = DateTime.UtcNow;
+        var a = new ClientSnapshot("session-A", "A", "Agent A", "10.0.0.1", true, now, now, now, 10, 20, []);
+        var b = a with { SessionId = "session-B", ClientId = "B", Hostname = "Agent B" };
+        SetField(form, "_snapshots", new ClientSnapshot[] { a, b });
+        var states = Field<Dictionary<string, SessionCommandState>>(form, "_commands");
+        var pendingA = new SessionCommandState { PingStatus = "Pending A", ScanStatus = "Pending A" };
+        states[a.SessionId] = pendingA;
+        Select(a.SessionId);
+        Select(b.SessionId);
+        // Model completion of the captured A state after global selection changed to B.
+        pendingA.Ping = new PingResult { Host = "A-target", Sent = 4, Received = 4 };
+        pendingA.Scan = new ScanResultMessage { Success = true, Devices = [new() { IpAddress = "10.0.0.99", IsOnline = true }] };
+        pendingA.PingStatus = "Completed A";
+        Select(b.SessionId);
+        var pingView = Field<PingView>(form, "_pingPage");
+        var scanView = Field<ScanView>(form, "_scanner");
+        if (Field<PingResult?>(pingView, "_shownResult") is not null || Field<DataGridView>(scanView, "_grid").Rows.Count != 0)
+            throw new Exception("A results leaked into selected B");
+        Console.WriteLine("PASS Phase 11 UI: completion for A stays hidden while B is selected");
+        Select(a.SessionId);
+        if (!ReferenceEquals(Field<PingResult?>(pingView, "_shownResult"), pendingA.Ping)
+            || Field<DataGridView>(scanView, "_grid").Rows.Count != 1)
+            throw new Exception("A results were not restored when selecting A");
+        Console.WriteLine("PASS Phase 11 UI: selecting A restores only A Ping and Scan results");
+        var reconnected = a with { SessionId = "new-session-A" };
+        SetField(form, "_snapshots", new ClientSnapshot[] { a, b, reconnected });
+        Select(reconnected.SessionId);
+        if (Field<PingResult?>(pingView, "_shownResult") is not null || Field<DataGridView>(scanView, "_grid").Rows.Count != 0)
+            throw new Exception("Old session results leaked into reconnect");
+        Console.WriteLine("PASS Phase 11 UI: new session starts with empty command results");
+        reconnected = reconnected with { Interfaces = [new("Wi-Fi", "172.31.99.116", "", "172.31.98.1", "172.31.98.0/23")] };
+        SetField(form, "_snapshots", new ClientSnapshot[] { a, b, reconnected });
+        Select(reconnected.SessionId);
+        if (scanView.SubnetInput.Text != "172.31.98.0/23") throw new Exception("Late network snapshot did not prefill subnet");
+        Select(b.SessionId);
+        if (scanView.SubnetInput.Text != "") throw new Exception("Previous client subnet leaked into B");
+        Console.WriteLine("PASS Phase 11 UI: late network snapshot prefills /23; B never inherits A subnet");
+        var telemetry = Field<TelemetryView>(form, "_dashboardTelemetry");
+        telemetry.UpdateClient(a with { LastTelemetryAt = now.AddSeconds(-11) }, []);
+        if (!telemetry.Heading.Text.Contains("STALE")) throw new Exception("Stale data presented as live");
+        Console.WriteLine("PASS Phase 11 UI: stale telemetry is visibly labeled");
+
+        void Select(string id)
+        {
+            SetField(form, "_selectedId", id);
+            typeof(ServerDashboardForm).GetMethod("RenderSelection", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(form, null);
+        }
+    }
+
+    private static T Field<T>(object instance, string name) =>
+        (T)instance.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(instance)!;
+    private static void SetField(object instance, string name, object value) =>
+        instance.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(instance, value);
     private static IEnumerable<Control> Descendants(Control parent)
     {
         foreach (Control child in parent.Controls)

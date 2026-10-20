@@ -9,8 +9,9 @@ namespace NetworkAdmin.Server;
 internal sealed class ClientManager
 {
     private readonly ConcurrentDictionary<string, ClientSessionInfo> _sessions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _registrationLock = new();
 
-    public ClientSessionInfo Register(string clientId, string clientName, string sessionId, NetworkStream stream)
+    public ClientSessionInfo Register(string clientId, string clientName, string sessionId, NetworkStream stream, out ClientSessionInfo? replacedSession)
     {
         var now = DateTime.UtcNow;
         var session = new ClientSessionInfo
@@ -24,7 +25,17 @@ internal sealed class ClientManager
             RemoteAddress = (stream.Socket.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString() ?? string.Empty
         };
 
-        _sessions[sessionId] = session;
+        lock (_registrationLock)
+        {
+            replacedSession = _sessions.Values.FirstOrDefault(existing =>
+                string.Equals(existing.ClientId, clientId, StringComparison.OrdinalIgnoreCase));
+            if (replacedSession is not null)
+            {
+                _sessions.TryRemove(new KeyValuePair<string, ClientSessionInfo>(replacedSession.SessionId, replacedSession));
+                replacedSession.Stream.Dispose();
+            }
+            _sessions[sessionId] = session;
+        }
         return session;
     }
 
@@ -48,7 +59,8 @@ internal sealed class ClientManager
     public void Remove(string sessionId)
     {
         // Writers may still hold or await the semaphore. Let it be collected with the session.
-        _sessions.TryRemove(sessionId, out _);
+        if (_sessions.TryGetValue(sessionId, out var session))
+            _sessions.TryRemove(new KeyValuePair<string, ClientSessionInfo>(sessionId, session));
     }
 
     public bool UpdateNetworkInfo(string sessionId, ClientNetworkInfo networkInfo, out ClientSessionInfo? session)

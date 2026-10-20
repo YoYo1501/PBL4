@@ -12,7 +12,10 @@
     <Compile Include="..\UI\TelemetryHistory.cs" />
     <Compile Include="..\..\NetworkAdmin.Client\Services\PingService.cs" />
     <Compile Include="..\..\NetworkAdmin.Client\Services\ClientCommandHandler.cs;..\..\NetworkAdmin.Client\Services\ServerConnection.cs" />
-    <Compile Include="..\..\Interfaces\IPingService.cs" />
-    <Compile Include="..\..\Interfaces\INetworkScannerService.cs;..\..\Models\NetworkScanProgress.cs" />
+    <Compile Include="..\..\NetworkAdmin.Client\Interfaces\IPingService.cs" />
+    <Compile Include="..\..\NetworkAdmin.Client\Interfaces\INetworkScannerService.cs;..\..\NetworkAdmin.Client\Models\NetworkScanProgress.cs" />
+    <Compile Include="..\..\NetworkAdmin.Client\ClientOptions.cs;..\..\NetworkAdmin.Client\Services\ClientRuntime.cs;..\..\NetworkAdmin.Client\Services\ClientTelemetryService.cs;..\..\NetworkAdmin.Client\Services\ClientNetworkInfoService.cs" />
+    <Compile Include="..\..\NetworkAdmin.Client\Services\NetworkScannerService.cs;..\..\NetworkAdmin.Client\Services\NetworkInfoService.cs" />
+    <Compile Include="..\..\NetworkAdmin.Client\Interfaces\INetworkInfoService.cs;..\..\NetworkAdmin.Client\Interfaces\ISystemMonitorService.cs" />
   </ItemGroup>
 </Project>

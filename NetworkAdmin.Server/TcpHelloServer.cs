@@ -66,7 +66,10 @@ internal sealed class TcpHelloServer
             using (client)
             await using (var stream = client.GetStream())
             {
-                var envelope = await JsonLineProtocol.ReceiveAsync(stream, cancellationToken: serverCancellationToken)
+                JsonLineProtocol.EnableKeepAlive(client);
+                using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(serverCancellationToken);
+                helloTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+                var envelope = await JsonLineProtocol.ReceiveAsync(stream, cancellationToken: helloTimeout.Token)
                     .ConfigureAwait(false);
 
                 if (envelope is null)
@@ -89,7 +92,10 @@ internal sealed class TcpHelloServer
                 }
 
                 sessionId = Guid.NewGuid().ToString("N");
-                var session = _clientManager.Register(hello.ClientId, hello.ClientName, sessionId, stream);
+                var session = _clientManager.Register(hello.ClientId, hello.ClientName, sessionId, stream, out var replacedSession);
+                if (replacedSession is not null)
+                    _commandDispatcher.FailPendingForSession(replacedSession.SessionId,
+                        new IOException($"Client session replaced: {replacedSession.SessionId}"));
                 Console.WriteLine("Client connected");
                 Console.WriteLine($"ClientId: {session.ClientId}");
                 Console.WriteLine($"ClientName: {session.ClientName}");

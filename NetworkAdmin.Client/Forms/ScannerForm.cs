@@ -917,29 +917,10 @@ namespace NetworkAdminTool.Forms
 
         private static bool TryValidateScanSubnet(string subnet, out string message)
         {
-            message = string.Empty;
-            if (string.IsNullOrWhiteSpace(subnet))
-            {
-                message = "Vui lòng nhập subnet hoặc CIDR, ví dụ: 192.168.1.0/24";
-                return false;
-            }
-
-            if (!TryParseCidr(subnet, out _, out var prefix) || prefix is < 1 or > 30)
-            {
-                message = "Subnet không hợp lệ. Hãy nhập dạng CIDR như 192.168.1.0/24 hoặc dải 192.168.1.1 - 192.168.1.254.";
-                return false;
-            }
-
-            var hostCount = CountHosts(subnet);
-            if (hostCount > 65_534)
-            {
-                message = "Dải quét quá lớn. Vui lòng dùng /16 hoặc nhỏ hơn để tránh quét quá lâu.";
-                return false;
-            }
-
-            return true;
+            var valid = NetworkAdmin.Shared.Protocol.ScanSubnet.TryNormalize(subnet, out _);
+            message = valid ? string.Empty : "Subnet không hợp lệ. Nhập IPv4 CIDR /23 đến /30 (tối đa 510 host).";
+            return valid;
         }
-
         private static bool TryParseCidr(string cidr, out uint network, out int prefix)
         {
             network = 0;

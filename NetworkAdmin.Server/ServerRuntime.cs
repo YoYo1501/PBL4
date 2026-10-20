@@ -1,4 +1,5 @@
 using NetworkAdmin.Shared.Messages;
+using NetworkAdmin.Shared.Models;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdminTool.Models;
 
@@ -11,7 +12,7 @@ internal sealed class ServerRuntime
     private readonly ServerCommandDispatcher _dispatcher;
     private readonly TcpHelloServer _server;
     private readonly CancellationTokenSource _shutdown = new();
-    private readonly Dictionary<string, ClientSnapshot> _history = new();
+    private readonly Dictionary<string, ClientSnapshot> _history = new(StringComparer.OrdinalIgnoreCase);
     private Task? _serverTask;
     private volatile string? _error;
 
@@ -42,13 +43,13 @@ internal sealed class ServerRuntime
     // Called by the UI timer, never by a socket callback. Retain recent disconnected sessions.
     public IReadOnlyList<ClientSnapshot> GetClients()
     {
-        var current = new HashSet<string>();
+        var current = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var session in _clients.GetSessions())
         {
             lock (session)
             {
-                current.Add(session.SessionId);
-                _history[session.SessionId] = new ClientSnapshot(session.SessionId, session.ClientId,
+                current.Add(session.ClientId);
+                _history[session.ClientId] = new ClientSnapshot(session.SessionId, session.ClientId,
                     session.LatestNetworkInfo?.Hostname ?? session.ClientName, session.RemoteAddress,
                     true, session.ConnectedAt, session.LastSeen, session.LastTelemetryAt,
                     session.LatestSystemStats?.CpuUsagePercent, session.LatestSystemStats?.RamUsagePercent,
@@ -56,10 +57,10 @@ internal sealed class ServerRuntime
                         i.Name, i.IpAddress, i.MacAddress, i.Gateway, i.Subnet, i.Description)).ToArray());
             }
         }
-        foreach (var id in _history.Keys.Except(current).ToArray())
+        foreach (var id in _history.Keys.Except(current, StringComparer.OrdinalIgnoreCase).ToArray())
             _history[id] = _history[id] with { Connected = false };
         foreach (var old in _history.Values.Where(c => !c.Connected).OrderByDescending(c => c.LastSeen).Skip(200).ToArray())
-            _history.Remove(old.SessionId);
+            _history.Remove(old.ClientId);
         return _history.Values.OrderBy(c => c.ConnectedAt).ToArray();
     }
 
@@ -92,16 +93,17 @@ internal sealed class ServerRuntime
 internal sealed record InterfaceSnapshot(string Name, string IpAddress, string MacAddress, string Gateway, string Subnet, string Description = "")
 {
     // Agents already report Up interfaces. Use the existing adapter description to avoid promoting virtual NICs.
-    public bool IsVirtual => new[] { "vmware", "vethernet", "virtual", "hyper-v", "virtualbox", "loopback", "tunnel", "tap-", "vpn", "docker", "wsl" }
-        .Any(marker => $"{Name} {Description}".Contains(marker, StringComparison.OrdinalIgnoreCase));
+    public bool IsVirtual => NetworkInterfacePolicy.IsVirtual(Name, Description);
 }
 internal sealed record ScanHostSnapshot(string IpAddress, string MacAddress, string Status, string ManagedClient, string Hostname);
 internal sealed record ClientSnapshot(string SessionId, string ClientId, string Hostname, string RemoteAddress,
     bool Connected, DateTime ConnectedAt, DateTime LastSeen, DateTime? LastTelemetryAt,
     float? Cpu, float? Ram, IReadOnlyList<InterfaceSnapshot> Interfaces)
 {
-    public InterfaceSnapshot? PrimaryInterface => Interfaces.Where(i => !i.IsVirtual && !string.IsNullOrWhiteSpace(i.IpAddress))
-        .OrderByDescending(i => !string.IsNullOrWhiteSpace(i.Gateway)).FirstOrDefault();
+    public InterfaceSnapshot? PrimaryInterface => Interfaces.Where(i => !i.IsVirtual && NetworkInterfacePolicy.HasUsableIpv4(i.IpAddress))
+        .OrderByDescending(i => NetworkInterfacePolicy.HasUsableIpv4(i.Gateway)).FirstOrDefault();
+    public bool HasFreshTelemetry(DateTime utcNow) => Connected && LastTelemetryAt is DateTime at
+        && utcNow - at <= TimeSpan.FromSeconds(10);
     public string IpAddress => PrimaryInterface?.IpAddress ?? RemoteAddress;
     public string MacAddress => PrimaryInterface?.MacAddress ?? "";
     public override string ToString() => $"{Hostname} | {IpAddress} | {(Connected ? "Connected" : "Disconnected")} | SessionId: {SessionId}";

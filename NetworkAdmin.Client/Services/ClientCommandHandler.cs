@@ -11,6 +11,10 @@ internal sealed class ClientCommandHandler
     private readonly IPingService _pingService;
     private readonly ServerConnection _connection;
     private INetworkScannerService? _scannerService;
+    private Task _scanTask = Task.CompletedTask;
+
+    // The connection's single read loop calls HandleAsync. Drain after that loop stops.
+    public Task DrainAsync() => _scanTask;
 
     public ClientCommandHandler(IPingService pingService, ServerConnection connection)
     {
@@ -35,15 +39,18 @@ internal sealed class ClientCommandHandler
 
         if (envelope.Type == MessageType.ScanRequest)
         {
-            _ = Task.Run(() => HandleScanCommandAsync(envelope, cancellationToken), CancellationToken.None);
+            if (!_scanTask.IsCompleted)
+            {
+                await _connection.SendAsync(MessageType.ScanResult, envelope.RequestId,
+                    new ScanResultMessage { Success = false, ErrorMessage = "A scan is already running on this client." }, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            _scanTask = Task.Run(() => HandleScanCommandAsync(envelope, cancellationToken), CancellationToken.None);
             return;
         }
 
-        if (envelope.Type != MessageType.PingRequest)
-        {
-            Console.WriteLine($"Ignoring unsupported server message: {envelope.Type}");
-            return;
-        }
+        Console.WriteLine($"Ignoring unsupported server message: {envelope.Type}");
     }
 
     private async Task<PingResult> HandlePingAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
@@ -120,9 +127,9 @@ internal sealed class ClientCommandHandler
                 ?? new ScanRequestMessage();
 
             var subnet = request.Subnet?.Trim() ?? string.Empty;
-            var timeoutMs = request.TimeoutMs <= 0 ? 800 : request.TimeoutMs;
+            var timeoutMs = request.TimeoutMs <= 0 ? 800 : Math.Clamp(request.TimeoutMs, 100, 1000);
 
-            if (!string.IsNullOrWhiteSpace(subnet) && !IsSupportedScanSubnet(subnet))
+            if (!string.IsNullOrWhiteSpace(subnet) && !ScanSubnet.TryNormalize(subnet, out subnet))
             {
                 return new ScanResultMessage
                 {
@@ -176,5 +183,4 @@ internal sealed class ClientCommandHandler
         }
     }
 
-    private static bool IsSupportedScanSubnet(string subnet) => ScanSubnet.TryNormalize(subnet, out _);
 }

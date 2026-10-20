@@ -34,6 +34,7 @@ internal sealed class ServerCommandDispatcher
         }
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
         try
         {
             await _clientManager.SendAsync(
@@ -43,7 +44,11 @@ internal sealed class ServerCommandDispatcher
                 new PingRequestMessage { Target = target },
                 timeoutCts.Token).ConfigureAwait(false);
 
-            return await pending.Completion.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+            return await pending.Completion.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        {
+            throw new TimeoutException("Ping command timed out.");
         }
         finally
         {
@@ -58,8 +63,7 @@ internal sealed class ServerCommandDispatcher
             return false;
         }
 
-        pending.Completion.TrySetResult(result);
-        return true;
+        return pending.Completion.TrySetResult(result);
     }
 
     public async Task<ScanResultMessage> SendScanAsync(
@@ -75,6 +79,8 @@ internal sealed class ServerCommandDispatcher
             throw new InvalidOperationException("Unable to track scan request.");
         }
 
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
         try
         {
             await _clientManager.SendAsync(
@@ -82,9 +88,13 @@ internal sealed class ServerCommandDispatcher
                 MessageType.ScanRequest,
                 requestId,
                 new ScanRequestMessage { Subnet = subnet, TimeoutMs = 800 },
-                cancellationToken).ConfigureAwait(false);
+                timeoutCts.Token).ConfigureAwait(false);
 
-            return await pending.Completion.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+            return await pending.Completion.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        {
+            throw new TimeoutException("Scan command timed out.");
         }
         finally
         {
@@ -99,8 +109,7 @@ internal sealed class ServerCommandDispatcher
             return false;
         }
 
-        pending.Completion.TrySetResult(result);
-        return true;
+        return pending.Completion.TrySetResult(result);
     }
 
     public void FailPendingForSession(string sessionId, Exception exception)

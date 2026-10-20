@@ -25,6 +25,7 @@ internal sealed class ServerConnection : IAsyncDisposable
     public async Task<HelloAckMessage> ConnectAsync(string host, int port, CancellationToken cancellationToken)
     {
         _client = new TcpClient();
+        JsonLineProtocol.EnableKeepAlive(_client);
         await _client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
         _stream = _client.GetStream();
 
@@ -131,6 +132,7 @@ internal sealed class ServerConnection : IAsyncDisposable
         _client?.Dispose();
         _stream = null;
         _client = null;
+        SessionId = null;
         return Task.CompletedTask;
     }
 

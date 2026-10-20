@@ -4,40 +4,50 @@
 
 ```
 NetworkAdminTool/
-├── Models/
-│   ├── NetworkDevice.cs      # 1 thiết bị/host sau khi scan
-│   ├── PingResult.cs         # Kết quả ping 1 host
-│   └── SystemStats.cs        # Snapshot CPU + RAM tại 1 thời điểm
-├── Services/
-│   ├── NetworkInfoService.cs     # Lấy IP/subnet của máy hiện tại
-│   ├── NetworkScannerService.cs  # Quét cả dải IP (song song)
-│   ├── PingService.cs            # Ping 1 host
-│   ├── SystemMonitorService.cs   # CPU + RAM real-time
-│   └── LoggerService.cs          # Ghi log ra /Logs
-├── Forms/
-│   ├── MainForm.cs         # Dashboard, menu chức năng
-│   ├── ScannerForm.cs      # Giao diện Scan IP
-│   ├── PingForm.cs         # Giao diện Ping
-│   ├── MonitorForm.cs      # Giao diện CPU/RAM
-│   └── FeatureForms.cs     # Network Info, Alerts, Logs, Settings, About
-├── Assets/
-├── Logs/
-├── Program.cs
-└── NetworkAdminTool.csproj
+├── NetworkAdmin.Client/
+│   ├── Forms/              # Giao diện cục bộ
+│   ├── Interfaces/         # Hợp đồng của các service Client
+│   ├── Models/             # Tiến độ quét cục bộ
+│   ├── Services/           # Đo CPU/RAM, Ping, Scan, kết nối Server
+│   ├── Assets/
+│   ├── appsettings.json
+│   ├── Program.cs
+│   └── NetworkAdmin.Client.csproj
+├── NetworkAdmin.Server/
+│   ├── UI/                 # Giao diện quản trị
+│   ├── Validation/         # Chương trình kiểm tra
+│   ├── Program.cs
+│   └── NetworkAdmin.Server.csproj
+├── NetworkAdmin.Shared/
+│   ├── Models/             # Dữ liệu dùng chung
+│   ├── Messages/           # Yêu cầu và phản hồi
+│   ├── Protocol/           # Giao thức JSON qua TCP
+│   └── NetworkAdmin.Shared.csproj
+└── NetworkAdminTool.slnx
 ```
 
 ## Cách build & chạy (bắt buộc trên Windows)
 
 ```powershell
-dotnet build
-dotnet run
+dotnet build NetworkAdminTool.slnx
+
+# Server và Client chạy ở hai terminal riêng; mở Server trước.
+dotnet run --project NetworkAdmin.Server
+dotnet run --project NetworkAdmin.Client
+
+# Chạy cục bộ, không kết nối Server:
+dotnet run --project NetworkAdmin.Client -- --standalone
 ```
 
 Yêu cầu: .NET 10 SDK, hệ điều hành **Windows** (WinForms và
 `PerformanceCounter` chỉ chạy trên Windows, không chạy được trên
 macOS/Linux).
 
+Ứng dụng gốc đã được gộp vào Client với tùy chọn `--standalone`. Client tự biên dịch code trong thư mục của mình và tham chiếu Shared qua `ProjectReference`; không còn liên kết source từ thư mục gốc. Cấu hình được đọc từ `appsettings.json` cạnh file thực thi.
+
 ## Trạng thái từng phần
+
+Phase 11: scanner hỗ trợ IPv4 `/23`–`/30`, tối đa 510 host và 32 probe đồng thời mỗi lần quét. Client tự kết nối lại sau mất kết nối; kết quả Ping/Scan trên Server được giữ theo phiên đang chọn. Xem [PHASE11.md](PHASE11.md) để biết phụ thuộc, thay đổi, kiểm tra tự động và quy trình thử trên hai máy.
 
 | File | Trạng thái |
 |---|---|
@@ -56,7 +66,7 @@ macOS/Linux).
 - Thêm thanh tiến trình trong `ScannerForm`: hiển thị số host đã quét, tổng host, số thiết bị online và IP hiện tại.
 - Mở rộng `NetworkScannerService`/`INetworkScannerService` với `IProgress<NetworkScanProgress>` để UI nhận tiến độ trong lúc quét.
 - Sửa lỗi tiềm ẩn khi đếm host CIDR bằng dịch bit `int`; chuyển sang tính bằng `long` và giới hạn về `int`.
-- Validate subnet trước khi quét: nhận CIDR như `192.168.1.0/24` hoặc dải `192.168.1.1 - 192.168.1.254`; chặn dải quá lớn hơn `/16` để tránh treo lâu.
+- Validate subnet trước khi quét: nhận CIDR như `172.31.99.116/23`; Phase 11 giới hạn `/23`–`/30` (tối đa 510 host), áp dụng cả trên Server và Client.
 - Reset/cập nhật trạng thái nút quét, đồng hồ và progress bar khi hoàn tất hoặc hủy quét.
 - Làm đẹp `PingForm` và `MonitorForm`: dùng layout co giãn, font/màu đồng nhất, `ProgressBar` cho CPU/RAM.
 - Thêm giao diện riêng cho các mục `Network Info`, `Alerts`, `Logs`, `Settings`, `About` và nối menu dashboard để mở đúng chức năng.
@@ -99,7 +109,7 @@ macOS/Linux).
 Tạo 1 project Console tạm, gọi thử:
 
 ```csharp
-var scanner = new NetworkScannerService();
+var scanner = new NetworkScannerService(new PingService(), new NetworkInfoService());
 var devices = await scanner.ScanNetworkAsync("192.168.1");
 foreach (var d in devices) Console.WriteLine($"{d.IpAddress} - {d.ResponseTimeMs}ms");
 ```

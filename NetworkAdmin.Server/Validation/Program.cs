@@ -80,6 +80,9 @@ try
     var scan = runtime.ScanAsync(b.SessionId, "10.20.30.0/24", default);
     var scanRequest = await b.Read();
     Check(scanRequest.Type == MessageType.ScanRequest, "Scan routed to selected agent");
+    await a.Send(MessageType.ScanResult, scanRequest.RequestId, new ScanResultMessage { Success = true });
+    await Task.Delay(100);
+    Check(!scan.IsCompleted, "Phase 11: reject cross-session Scan response");
     await b.Stats(66, 88);
     await Eventually(() => runtime.GetClients().Single(c => c.SessionId == b.SessionId).Cpu == 66);
     Check(!scan.IsCompleted, "Telemetry continues during pending Scan");
@@ -107,6 +110,20 @@ try
     }
     await Eventually(() => !runtime.GetClients().Single(c => c.SessionId == a.SessionId).Connected);
     Check(ServerRuntime.MatchScan(result, runtime.GetClients())[0].ManagedClient == "No", "Disconnected agent is no longer managed");
+    using var reconnectedA = await Agent.Connect(port, "A", "10.20.30.10");
+    await reconnectedA.Stats(33, 55);
+    await Eventually(() => runtime.GetClients().Any(c => c.SessionId == reconnectedA.SessionId && c.Cpu == 33));
+    Check(reconnectedA.SessionId != a.SessionId && runtime.GetClients().Count(c => c.ClientId == "A") == 1
+        && runtime.GetClients().Single(c => c.ClientId == "A") is { Connected: true } currentA
+        && currentA.SessionId == reconnectedA.SessionId,
+        "Phase 11: same ClientId reconnects to existing server as one row with the latest session");
+    var nextPing = runtime.PingAsync(reconnectedA.SessionId, "127.0.0.1", default);
+    var nextRequest = await reconnectedA.Read();
+    await reconnectedA.Send(MessageType.PingResult, request.RequestId, ping);
+    await Task.Delay(100);
+    Check(!nextPing.IsCompleted, "Phase 11: delayed old request result cannot complete new session command");
+    await reconnectedA.Send(MessageType.PingResult, nextRequest.RequestId, ping);
+    await nextPing;
     using var malformed = new TcpClient(); await malformed.ConnectAsync(IPAddress.Loopback, port);
     await malformed.GetStream().WriteAsync("not-json\n"u8.ToArray());
     await b.Stats(70, 90);
@@ -134,6 +151,7 @@ try
     Check(!runtime.IsRunning && runtime.GetClients().All(c => !c.Connected), "Shutdown awaits connection cleanup");
 }
 finally { await runtime.StopAsync(); }
+await Phase11Checks.RunAsync(Check);
 Console.WriteLine($"ALL {checks} CHECKS PASSED");
 
 sealed class Agent : IDisposable
