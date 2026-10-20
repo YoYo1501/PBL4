@@ -35,8 +35,41 @@ dotnet build NetworkAdminTool.slnx
 dotnet run --project NetworkAdmin.Server
 dotnet run --project NetworkAdmin.Client
 
+# Chạy Server ở chế độ console để xem địa chỉ bind và log kết nối.
+dotnet run --project NetworkAdmin.Server -- --console
+
 # Chạy cục bộ, không kết nối Server:
 dotnet run --project NetworkAdmin.Client -- --standalone
+```
+
+## Chạy Server và Client trên hai máy Windows
+
+1. Trên máy Server, lấy địa chỉ IPv4 trong mạng LAN (ví dụ `192.168.1.10`) bằng `ipconfig`.
+2. Mở TCP cổng 5000 trong Windows Firewall trên máy Server (PowerShell chạy với quyền Administrator):
+
+   ```powershell
+   New-NetFirewallRule -DisplayName "NetworkAdmin Server TCP 5000" -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
+   ```
+
+   Hoặc dùng Command Prompt chạy với quyền Administrator:
+
+   ```cmd
+   netsh advfirewall firewall add rule name="NetworkAdmin Server TCP 5000" dir=in action=allow protocol=TCP localport=5000
+   ```
+
+3. Khởi chạy Server. Mặc định Server bind `0.0.0.0:5000` (mọi interface IPv4); ở chế độ console, lệnh `dotnet run --project NetworkAdmin.Server -- --console` in địa chỉ và cổng đang nghe.
+4. Trên máy Client, kết nối tới IP LAN của máy Server:
+
+   ```powershell
+   dotnet run --project NetworkAdmin.Client -- --host 192.168.1.10 --port 5000
+   ```
+
+   Thay `192.168.1.10` bằng địa chỉ IPv4 thực tế của máy Server. Đảm bảo hai máy thông mạng và cùng cho phép lưu lượng TCP 5000.
+
+Để chỉ nhận kết nối từ chính máy Server, khởi chạy với `--host 127.0.0.1`:
+
+```powershell
+dotnet run --project NetworkAdmin.Server -- --host 127.0.0.1
 ```
 
 Yêu cầu: .NET 10 SDK, hệ điều hành **Windows** (WinForms và

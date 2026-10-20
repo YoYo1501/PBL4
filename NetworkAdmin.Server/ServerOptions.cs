@@ -11,7 +11,7 @@ internal sealed class ServerOptions
     {
         var host = GetValue(args, "--host")
             ?? Environment.GetEnvironmentVariable("NETWORKADMIN_SERVER_HOST")
-            ?? "127.0.0.1";
+            ?? IPAddress.Any.ToString();
 
         var portText = GetValue(args, "--port")
             ?? Environment.GetEnvironmentVariable("NETWORKADMIN_SERVER_PORT")
@@ -19,7 +19,8 @@ internal sealed class ServerOptions
 
         if (!IPAddress.TryParse(host, out var address))
         {
-            address = IPAddress.Loopback;
+            Console.WriteLine($"Warning: invalid server host '{host}'. Listening on {IPAddress.Any} instead.");
+            address = IPAddress.Any;
         }
 
         if (!int.TryParse(portText, out var port) || port <= 0 || port > 65535)
