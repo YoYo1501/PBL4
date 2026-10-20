@@ -17,4 +17,7 @@ internal sealed class SessionCommandState
     public bool ScanError { get; set; }
     public bool PingPending { get; set; }
     public bool ScanPending { get; set; }
+    public string RemoteInfoStatus { get; set; } = "No remote command executed for this session.";
+    public bool RemoteInfoError { get; set; }
+    public bool RemoteInfoPending { get; set; }
 }

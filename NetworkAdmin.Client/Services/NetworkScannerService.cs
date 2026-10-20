@@ -13,7 +13,6 @@ namespace NetworkAdminTool.Services
         private const int WarmUpTimeoutMs = 250;
         private const int WarmUpRetryCount = 1;
         private const int DiscoveryRetryCount = 2;
-        private const int MinimumDiscoveryTimeoutMs = 500;
 
         private readonly IPingService _pingService;
         private readonly INetworkInfoService _networkInfoService;
@@ -46,7 +45,7 @@ namespace NetworkAdminTool.Services
             // Pass 1 warms ARP/neighbor cache to reduce first-probe misses.
             await ExecutePingPassAsync(ipsToScan, WarmUpTimeoutMs, WarmUpRetryCount, cancellationToken, collectResult: false);
 
-            var effectiveTimeoutMs = Math.Clamp(timeoutMs, MinimumDiscoveryTimeoutMs, 1000);
+            var effectiveTimeoutMs = ScanSubnet.ClampTimeout(timeoutMs);
             var pingResults = await ExecutePingPassAsync(
                 ipsToScan,
                 effectiveTimeoutMs,

@@ -101,6 +101,13 @@ internal sealed class ClientManager
     public IReadOnlyList<ClientSessionInfo> GetSessions() =>
         _sessions.Values.Where(s => s.IsReady).OrderBy(s => s.ConnectedAt).ToList();
 
+    public bool TryGetActiveSession(string clientId, out ClientSessionInfo? session)
+    {
+        session = _sessions.Values.FirstOrDefault(candidate =>
+            candidate.IsReady && string.Equals(candidate.ClientId, clientId, StringComparison.OrdinalIgnoreCase));
+        return session is not null;
+    }
+
     public async Task SendAsync<TPayload>(
         string sessionId,
         MessageType type,

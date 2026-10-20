@@ -8,7 +8,7 @@
   <ItemGroup>
     <Compile Remove="Layout\**\*.cs" />
     <ProjectReference Include="..\..\NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
-    <Compile Include="..\ClientManager.cs;..\ClientSessionInfo.cs;..\ServerCommandDispatcher.cs;..\ServerOptions.cs;..\TcpHelloServer.cs;..\ServerRuntime.cs" />
+    <Compile Include="..\ClientManager.cs;..\ClientSessionInfo.cs;..\RemoteAdministrationAuditLog.cs;..\ServerCommandDispatcher.cs;..\ServerOptions.cs;..\TcpHelloServer.cs;..\ServerRuntime.cs" />
     <Compile Include="..\UI\TelemetryHistory.cs" />
     <Compile Include="..\..\NetworkAdmin.Client\Services\PingService.cs" />
     <Compile Include="..\..\NetworkAdmin.Client\Services\ClientCommandHandler.cs;..\..\NetworkAdmin.Client\Services\ServerConnection.cs" />

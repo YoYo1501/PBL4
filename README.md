@@ -31,6 +31,9 @@ NetworkAdminTool/
 ```powershell
 dotnet build NetworkAdminTool.slnx
 
+# Đặt cùng token quản trị trên Server và Client trước khi dùng lệnh remote.
+$env:NETWORKADMIN_ADMIN_TOKEN = "thay-bang-token-bi-mat"
+
 # Server và Client chạy ở hai terminal riêng; mở Server trước.
 dotnet run --project NetworkAdmin.Server
 dotnet run --project NetworkAdmin.Client
@@ -65,6 +68,14 @@ dotnet run --project NetworkAdmin.Client -- --standalone
    ```
 
    Thay `192.168.1.10` bằng địa chỉ IPv4 thực tế của máy Server. Đảm bảo hai máy thông mạng và cùng cho phép lưu lượng TCP 5000.
+
+### Kiểm thử Remote Administration an toàn
+
+Server console hỗ trợ lệnh chỉ đọc `remote-info <clientId>`. Lệnh này dùng
+connection TCP hiện tại, yêu cầu `NETWORKADMIN_ADMIN_TOKEN` giống nhau ở hai
+phía, trả `Accepted` rồi `Completed`, và ghi audit vào
+`Logs/remote-administration.log` cạnh file chạy Server. Có thể truyền token
+bằng `--admin-token` thay cho biến môi trường.
 
 Để chỉ nhận kết nối từ chính máy Server, khởi chạy với `--host 127.0.0.1`:
 

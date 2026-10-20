@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "NetworkAdmin Server",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "${workspaceFolder}/NetworkAdmin.Server/bin/Debug/net10.0-windows/NetworkAdmin.Server.dll",
+      "cwd": "${workspaceFolder}/NetworkAdmin.Server",
+      "args": ["--host", "0.0.0.0", "--port", "5000"],
+      "env": {
+        "NETWORKADMIN_ADMIN_TOKEN": "test-token-123"
+      }
+    },
+    {
+      "name": "NetworkAdmin Client",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "${workspaceFolder}/NetworkAdmin.Client/bin/Debug/net10.0-windows/NetworkAdmin.Client.dll",
+      "cwd": "${workspaceFolder}/NetworkAdmin.Client",
+      "args": ["--host", "127.0.0.1", "--port", "5000"],
+      "env": {
+        "NETWORKADMIN_ADMIN_TOKEN": "test-token-123"
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "NetworkAdmin Server + Client",
+      "configurations": ["NetworkAdmin Server", "NetworkAdmin Client"]
+    }
+  ]
+}

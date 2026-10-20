@@ -1,3 +1,5 @@
+using NetworkAdmin.Shared.Messages;
+
 namespace NetworkAdmin.Server;
 
 internal static class Program
@@ -34,7 +36,7 @@ internal static class Program
         var dispatcher = new ServerCommandDispatcher(clientManager);
         var server = new TcpHelloServer(options, clientManager, dispatcher);
         var serverTask = server.RunAsync(cancellation.Token);
-        var commandTask = RunCommandLoopAsync(clientManager, dispatcher, cancellation.Token);
+        var commandTask = RunCommandLoopAsync(clientManager, dispatcher, options.AdminToken, cancellation.Token);
 
         await Task.WhenAny(serverTask, commandTask).ConfigureAwait(false);
         cancellation.Cancel();
@@ -45,9 +47,10 @@ internal static class Program
     private static async Task RunCommandLoopAsync(
         ClientManager clientManager,
         ServerCommandDispatcher dispatcher,
+        string adminToken,
         CancellationToken cancellationToken)
     {
-        Console.WriteLine("Commands: clients | ping <sessionId> <target> | scan <sessionId> [subnet] | exit");
+        Console.WriteLine("Commands: clients | ping <sessionId> <target> | scan <sessionId> [subnet] | remote-info <clientId> | exit");
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -119,6 +122,20 @@ internal static class Program
                     Console.WriteLine($"Scan command failed: {ex.Message}");
                 }
 
+                continue;
+            }
+
+            if (parts.Length >= 2 && parts[0].Equals("remote-info", StringComparison.OrdinalIgnoreCase))
+            {
+                var result = await dispatcher.SendRemoteAdministrationCommandAsync(
+                    parts[1],
+                    RemoteAdministrationCommandType.GetAgentInfo,
+                    adminToken,
+                    TimeSpan.FromSeconds(15),
+                    cancellationToken).ConfigureAwait(false);
+                Console.WriteLine(result.Status == RemoteAdministrationCommandStatus.Completed
+                    ? $"Remote command completed: {result.Result}"
+                    : $"Remote command {result.Status}: {result.ErrorMessage}");
                 continue;
             }
 

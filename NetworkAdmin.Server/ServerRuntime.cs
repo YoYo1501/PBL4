@@ -11,6 +11,7 @@ internal sealed class ServerRuntime
     private readonly ClientManager _clients = new();
     private readonly ServerCommandDispatcher _dispatcher;
     private readonly TcpHelloServer _server;
+    private readonly string _adminToken;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<string, ClientSnapshot> _history = new(StringComparer.OrdinalIgnoreCase);
     private Task? _serverTask;
@@ -20,6 +21,7 @@ internal sealed class ServerRuntime
     {
         _dispatcher = new(_clients);
         _server = new(options, _clients, _dispatcher);
+        _adminToken = options.AdminToken;
         Endpoint = $"{options.Host}:{options.Port}";
     }
 
@@ -78,6 +80,19 @@ internal sealed class ServerRuntime
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, _shutdown.Token);
         return await _dispatcher.SendScanAsync(sessionId, normalized, TimeSpan.FromSeconds(60), linked.Token, timeoutMs)
             .ConfigureAwait(false);
+    }
+
+    public Task<RemoteAdministrationResultMessage> GetAgentInfoAsync(
+        string clientId,
+        CancellationToken token,
+        TimeSpan? timeout = null)
+    {
+        return _dispatcher.SendRemoteAdministrationCommandAsync(
+            clientId,
+            RemoteAdministrationCommandType.GetAgentInfo,
+            _adminToken,
+            timeout ?? TimeSpan.FromSeconds(15),
+            token);
     }
 
     public static IReadOnlyList<ScanHostSnapshot> MatchScan(ScanResultMessage result, IReadOnlyList<ClientSnapshot> clients) =>

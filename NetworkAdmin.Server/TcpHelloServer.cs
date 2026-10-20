@@ -150,6 +150,12 @@ internal sealed class TcpHelloServer
                         continue;
                     }
 
+                    if (next.Type == MessageType.RemoteAdministrationResult)
+                    {
+                        HandleRemoteAdministrationResult(sessionId, next);
+                        continue;
+                    }
+
                     Console.WriteLine($"Ignoring unsupported message from {sessionId}: {next.Type}");
                 }
             }
@@ -200,7 +206,7 @@ internal sealed class TcpHelloServer
                 return;
             }
 
-            Console.WriteLine($"[{session.ClientName}] CPU: {stats.CpuUsagePercent:0.0}% | RAM: {stats.RamUsagePercent:0.0}%");
+            // Telemetry is high-frequency; keep it out of the interactive console.
         }
         catch (JsonException ex)
         {
@@ -324,6 +330,31 @@ internal sealed class TcpHelloServer
         catch (JsonException ex)
         {
             Console.WriteLine($"Malformed ScanResult from {sessionId}: {ex.Message}");
+        }
+    }
+
+    private void HandleRemoteAdministrationResult(string sessionId, MessageEnvelope envelope)
+    {
+        try
+        {
+            var result = JsonLineProtocol.GetPayload<RemoteAdministrationResultMessage>(envelope);
+            if (result is null)
+            {
+                Console.WriteLine($"Malformed remote administration result from {sessionId}");
+                return;
+            }
+
+            if (!_commandDispatcher.CompleteRemoteAdministrationCommand(sessionId, envelope.RequestId, result))
+            {
+                Console.WriteLine($"Unexpected remote administration result from {sessionId}: {envelope.RequestId}");
+                return;
+            }
+
+            Console.WriteLine($"Remote command {result.Command}: {result.Status}");
+        }
+        catch (JsonException ex)
+        {
+            Console.WriteLine($"Malformed remote administration result from {sessionId}: {ex.Message}");
         }
     }
 
