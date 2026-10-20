@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using NetworkAdminTool.Interfaces;
 using NetworkAdminTool.Services;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdminTool.Forms
 {

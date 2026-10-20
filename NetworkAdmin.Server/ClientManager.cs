@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.Sockets;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdmin.Server;
 

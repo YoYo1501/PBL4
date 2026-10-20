@@ -7,7 +7,13 @@ namespace NetworkAdmin.Shared.Protocol;
 public static class ScanSubnet
 {
     public const int MaxHosts = 510;
+    public const int DefaultTimeoutMs = 800;
+    public const int MinTimeoutMs = 100;
+    public const int MaxTimeoutMs = 1000;
     public const string Help = "Enter an IPv4 unicast CIDR /23 through /30 (maximum 510 hosts), or a three-octet /24 prefix.";
+
+    public static int ClampTimeout(int timeoutMs) =>
+        Math.Clamp(timeoutMs <= 0 ? DefaultTimeoutMs : timeoutMs, MinTimeoutMs, MaxTimeoutMs);
 
     public static bool TryNormalize(string? value, out string subnet)
     {

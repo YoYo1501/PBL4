@@ -1,8 +1,9 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdmin.Client.Services;
 
@@ -10,11 +11,32 @@ internal sealed class ClientCommandHandler
 {
     private readonly IPingService _pingService;
     private readonly ServerConnection _connection;
+    private readonly SemaphoreSlim _pingSlots = new(4, 4);
+    private readonly ConcurrentDictionary<Task, byte> _runningTasks = new();
+    private readonly object _scanSync = new();
     private INetworkScannerService? _scannerService;
     private Task _scanTask = Task.CompletedTask;
 
     // The connection's single read loop calls HandleAsync. Drain after that loop stops.
-    public Task DrainAsync() => _scanTask;
+    public async Task DrainAsync()
+    {
+        while (true)
+        {
+            RemoveCompletedTasks();
+            var tasks = _runningTasks.Keys.ToArray();
+            if (tasks.Length == 0)
+                return;
+
+            try
+            {
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Background command cleanup: {ex.Message}");
+            }
+        }
+    }
 
     public ClientCommandHandler(IPingService pingService, ServerConnection connection)
     {
@@ -31,26 +53,70 @@ internal sealed class ClientCommandHandler
     {
         if (envelope.Type == MessageType.PingRequest)
         {
-            var result = await HandlePingAsync(envelope, cancellationToken).ConfigureAwait(false);
-            await _connection.SendAsync(MessageType.PingResult, envelope.RequestId, result, cancellationToken)
-                .ConfigureAwait(false);
+            TrackTask(Task.Run(() => HandlePingCommandAsync(envelope, cancellationToken), CancellationToken.None));
             return;
         }
 
         if (envelope.Type == MessageType.ScanRequest)
         {
-            if (!_scanTask.IsCompleted)
+            var scanStarted = false;
+            lock (_scanSync)
             {
-                await _connection.SendAsync(MessageType.ScanResult, envelope.RequestId,
+                if (_scanTask.IsCompleted)
+                {
+                    _scanTask = Task.Run(() => HandleScanCommandAsync(envelope, cancellationToken), CancellationToken.None);
+                    TrackTask(_scanTask);
+                    scanStarted = true;
+                }
+            }
+
+            if (!scanStarted)
+            {
+                await TrySendAsync(MessageType.ScanResult, envelope.RequestId,
                     new ScanResultMessage { Success = false, ErrorMessage = "A scan is already running on this client." }, cancellationToken)
                     .ConfigureAwait(false);
-                return;
             }
-            _scanTask = Task.Run(() => HandleScanCommandAsync(envelope, cancellationToken), CancellationToken.None);
+
             return;
         }
 
         Console.WriteLine($"Ignoring unsupported server message: {envelope.Type}");
+    }
+
+    private async Task HandlePingCommandAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
+    {
+        var slotAcquired = false;
+        try
+        {
+            if (!_pingSlots.Wait(0))
+            {
+                await TrySendAsync(MessageType.PingResult, envelope.RequestId, new PingResult
+                {
+                    Success = false,
+                    RoundtripTimeMs = 0,
+                    StatusMessage = "Ping rejected: maximum 4 concurrent ping requests are already running."
+                }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            slotAcquired = true;
+            var result = await HandlePingAsync(envelope, cancellationToken).ConfigureAwait(false);
+            await TrySendAsync(MessageType.PingResult, envelope.RequestId, result, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+        {
+            Console.WriteLine($"Ping task canceled: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ping task stopped: {ex.Message}");
+        }
+        finally
+        {
+            if (slotAcquired)
+                _pingSlots.Release();
+        }
     }
 
     private async Task<PingResult> HandlePingAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
@@ -104,10 +170,52 @@ internal sealed class ClientCommandHandler
         try
         {
             var result = await HandleScanAsync(envelope, cancellationToken).ConfigureAwait(false);
-            await _connection.SendAsync(MessageType.ScanResult, envelope.RequestId, result, cancellationToken)
+            await TrySendAsync(MessageType.ScanResult, envelope.RequestId, result, cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (Exception ex) { Console.WriteLine($"Scan delivery stopped: {ex.Message}"); }
+        catch (OperationCanceledException ex) { Console.WriteLine($"Scan task canceled: {ex.Message}"); }
+        catch (Exception ex) { Console.WriteLine($"Scan task stopped: {ex.Message}"); }
+    }
+
+    private async Task TrySendAsync<TPayload>(MessageType type, string requestId, TPayload payload, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _connection.SendAsync(type, requestId, payload, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+        {
+            Console.WriteLine($"{type} delivery canceled: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"{type} delivery stopped: {ex.Message}");
+        }
+    }
+
+    private void TrackTask(Task task)
+    {
+        _runningTasks.TryAdd(task, 0);
+        _ = task.ContinueWith(
+            completedTask =>
+            {
+                if (completedTask.IsFaulted && completedTask.Exception is not null)
+                    Console.WriteLine($"Background command faulted: {completedTask.Exception.GetBaseException().Message}");
+
+                _runningTasks.TryRemove(completedTask, out _);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void RemoveCompletedTasks()
+    {
+        foreach (var task in _runningTasks.Keys)
+        {
+            if (task.IsCompleted)
+                _runningTasks.TryRemove(task, out _);
+        }
     }
 
     private async Task<ScanResultMessage> HandleScanAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
@@ -127,7 +235,7 @@ internal sealed class ClientCommandHandler
                 ?? new ScanRequestMessage();
 
             var subnet = request.Subnet?.Trim() ?? string.Empty;
-            var timeoutMs = request.TimeoutMs <= 0 ? 800 : Math.Clamp(request.TimeoutMs, 100, 1000);
+            var timeoutMs = ScanSubnet.ClampTimeout(request.TimeoutMs);
 
             if (!string.IsNullOrWhiteSpace(subnet) && !ScanSubnet.TryNormalize(subnet, out subnet))
             {

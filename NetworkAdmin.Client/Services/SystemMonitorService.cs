@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using Microsoft.VisualBasic.Devices;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdminTool.Services
 {

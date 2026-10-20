@@ -1,4 +1,5 @@
 using NetworkAdminTool.Interfaces;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdminTool.Forms
 {

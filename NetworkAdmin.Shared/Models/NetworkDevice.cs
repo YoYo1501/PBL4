@@ -1,4 +1,4 @@
-namespace NetworkAdminTool.Models
+namespace NetworkAdmin.Shared.Models
 {
     /// <summary>
     /// Dữ liệu thuần mô tả 1 thiết bị/host trong mạng LAN sau khi scan.

@@ -4,9 +4,9 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using NetworkAdmin.Shared.Models;
+using NetworkAdmin.Shared.Policies;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
 
 namespace NetworkAdminTool.Services;
 

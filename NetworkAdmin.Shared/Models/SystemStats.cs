@@ -1,4 +1,4 @@
-namespace NetworkAdminTool.Models
+namespace NetworkAdmin.Shared.Models
 {
     /// <summary>
     /// Snapshot số liệu hệ thống tại 1 thời điểm — dùng cho MonitorForm.

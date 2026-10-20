@@ -2,4 +2,5 @@
   <Project Path="NetworkAdmin.Client\NetworkAdmin.Client.csproj" />
   <Project Path="NetworkAdmin.Server\NetworkAdmin.Server.csproj" />
   <Project Path="NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
+  <Project Path="NetworkAdmin.Shared.Tests\NetworkAdmin.Shared.Tests.csproj" />
 </Solution>

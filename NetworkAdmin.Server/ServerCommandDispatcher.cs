@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using NetworkAdmin.Shared.Messages;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Protocol;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdmin.Server;
 
@@ -70,7 +71,8 @@ internal sealed class ServerCommandDispatcher
         string sessionId,
         string subnet,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int timeoutMs = ScanSubnet.DefaultTimeoutMs)
     {
         var requestId = Guid.NewGuid().ToString("N");
         var pending = new PendingScanRequest(sessionId);
@@ -81,13 +83,14 @@ internal sealed class ServerCommandDispatcher
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(timeout);
+        var effectiveTimeoutMs = ScanSubnet.ClampTimeout(timeoutMs);
         try
         {
             await _clientManager.SendAsync(
                 sessionId,
                 MessageType.ScanRequest,
                 requestId,
-                new ScanRequestMessage { Subnet = subnet, TimeoutMs = 800 },
+                new ScanRequestMessage { Subnet = subnet, TimeoutMs = effectiveTimeoutMs },
                 timeoutCts.Token).ConfigureAwait(false);
 
             return await pending.Completion.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);

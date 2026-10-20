@@ -3,7 +3,7 @@ using System.Reflection;
 using NetworkAdmin.Server;
 using NetworkAdmin.Server.UI;
 using NetworkAdmin.Shared.Messages;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 internal static class LayoutValidation
 {

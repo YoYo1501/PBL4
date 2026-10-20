@@ -3,7 +3,7 @@ using System.Globalization;
 using System.Net.NetworkInformation;
 using Microsoft.Extensions.DependencyInjection;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 using NetworkAdminTool.Services;
 
 namespace NetworkAdminTool.Forms
