@@ -3,7 +3,7 @@ using System.Diagnostics;
 using NetworkAdmin.Shared.Protocol;
 using System.Text.RegularExpressions;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdminTool.Services
 {
@@ -34,7 +34,7 @@ namespace NetworkAdminTool.Services
             int timeoutMs = 300,
             string? interfaceName = null,
             CancellationToken cancellationToken = default,
-            IProgress<NetworkScanProgress>? progress = null)
+            IProgress<NetworkAdminTool.Models.NetworkScanProgress>? progress = null)
         {
             if (!ScanSubnet.TryGetHostRange(subnet, out var hostAddresses))
             {
@@ -101,7 +101,7 @@ namespace NetworkAdminTool.Services
             int retryCount,
             CancellationToken cancellationToken,
             bool collectResult,
-            IProgress<NetworkScanProgress>? progress = null)
+            IProgress<NetworkAdminTool.Models.NetworkScanProgress>? progress = null)
         {
             var results = new ConcurrentDictionary<string, PingResult>(StringComparer.OrdinalIgnoreCase);
             using var throttler = new SemaphoreSlim(MaxConcurrentPings);
@@ -137,7 +137,7 @@ namespace NetworkAdminTool.Services
                     {
                         if (collectResult && progress != null)
                         {
-                            progress.Report(new NetworkScanProgress
+                            progress.Report(new NetworkAdminTool.Models.NetworkScanProgress
                             {
                                 ScannedHosts = Interlocked.Increment(ref scanned),
                                 TotalHosts = total,

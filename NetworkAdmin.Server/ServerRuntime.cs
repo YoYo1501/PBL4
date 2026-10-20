@@ -1,7 +1,7 @@
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Models;
+using NetworkAdmin.Shared.Policies;
 using NetworkAdmin.Shared.Protocol;
-using NetworkAdminTool.Models;
 
 namespace NetworkAdmin.Server;
 
@@ -71,11 +71,12 @@ internal sealed class ServerRuntime
             .ConfigureAwait(false);
     }
 
-    public async Task<ScanResultMessage> ScanAsync(string sessionId, string subnet, CancellationToken token)
+    public async Task<ScanResultMessage> ScanAsync(string sessionId, string subnet, CancellationToken token,
+        int timeoutMs = ScanSubnet.DefaultTimeoutMs)
     {
         if (!ScanSubnet.TryNormalize(subnet, out var normalized)) throw new ArgumentException(ScanSubnet.Help);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, _shutdown.Token);
-        return await _dispatcher.SendScanAsync(sessionId, normalized, TimeSpan.FromSeconds(60), linked.Token)
+        return await _dispatcher.SendScanAsync(sessionId, normalized, TimeSpan.FromSeconds(60), linked.Token, timeoutMs)
             .ConfigureAwait(false);
     }
 

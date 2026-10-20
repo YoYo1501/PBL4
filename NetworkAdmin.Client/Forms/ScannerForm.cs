@@ -3,7 +3,7 @@ using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Net;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 using NetworkAdminTool.Services;
 
 namespace NetworkAdminTool.Forms
@@ -733,7 +733,7 @@ namespace NetworkAdminTool.Forms
             _lblResultTitle.Text = "Kết quả quét (đang quét...)";
 
             var selectedInterface = _cboInterfaces.SelectedItem as NetworkInterfaceInfo;
-            var progress = new Progress<NetworkScanProgress>(p =>
+            var progress = new Progress<NetworkAdminTool.Models.NetworkScanProgress>(p =>
             {
                 var now = DateTime.UtcNow;
                 if (p.ScannedHosts < p.TotalHosts && (now - _lastProgressUiUpdateUtc).TotalMilliseconds < 150)

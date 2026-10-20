@@ -1,4 +1,4 @@
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdmin.Server.UI;
 
@@ -6,6 +6,21 @@ internal sealed class ScanView : DashboardCard
 {
     public Button ScanButton { get; } = DashboardTheme.Button("Scan Now");
     public TextBox SubnetInput { get; } = DashboardTheme.InputBox("192.168.1.0/24");
+    public NumericUpDown TimeoutInput { get; } = new()
+    {
+        Minimum = NetworkAdmin.Shared.Protocol.ScanSubnet.MinTimeoutMs,
+        Maximum = NetworkAdmin.Shared.Protocol.ScanSubnet.MaxTimeoutMs,
+        Value = NetworkAdmin.Shared.Protocol.ScanSubnet.DefaultTimeoutMs,
+        Increment = 50,
+        DecimalPlaces = 0,
+        ThousandsSeparator = false,
+        Dock = DockStyle.Fill,
+        BackColor = DashboardTheme.Input,
+        ForeColor = DashboardTheme.Text,
+        BorderStyle = BorderStyle.FixedSingle,
+        Font = new Font("Segoe UI", 10),
+        Margin = new Padding(4, 8, 8, 4)
+    };
     private readonly DataGridView _grid = DashboardTheme.Grid(("IpAddress", "IP Address", 115),
         ("Hostname", "Hostname", 125), ("MacAddress", "MAC Address", 140), ("Status", "Status", 65), ("ManagedClient", "Managed", 65));
     private readonly Label _status = DashboardTheme.Label("No scan completed.", 9, color: DashboardTheme.Muted);
@@ -14,13 +29,20 @@ internal sealed class ScanView : DashboardCard
     public ScanView(bool dedicated) : base(dedicated ? "IP Scanner / Remote Network Discovery" : "Recent Network Scan")
     {
         var layout = DashboardTheme.Rows(40, -100, 52);
-        var toolbar = DashboardTheme.Table(3, 1);
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, dedicated ? 40 : 100));
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, dedicated ? 60 : 0));
+        var toolbar = DashboardTheme.Table(dedicated ? 4 : 3, 1);
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, dedicated ? 30 : 100));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, dedicated ? 50 : 0));
+        if (dedicated)
+            toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
         toolbar.Controls.Add(_agent, 0, 0);
-        if (dedicated) { toolbar.Controls.Add(SubnetInput, 1, 0); ScanButton.Text = "Scan Network"; }
-        toolbar.Controls.Add(ScanButton, 2, 0);
+        if (dedicated)
+        {
+            toolbar.Controls.Add(SubnetInput, 1, 0);
+            toolbar.Controls.Add(TimeoutInput, 2, 0);
+            ScanButton.Text = "Scan Network";
+        }
+        toolbar.Controls.Add(ScanButton, dedicated ? 3 : 2, 0);
         layout.Controls.Add(toolbar, 0, 0); layout.Controls.Add(_grid, 0, 1); layout.Controls.Add(_status, 0, 2);
         Body.Controls.Add(layout);
     }
@@ -29,6 +51,7 @@ internal sealed class ScanView : DashboardCard
         _agent.Text = c is null ? "Select a managed client first" : $"Agent: {c.Hostname}  |  {c.IpAddress}";
         ScanButton.Enabled = enabled; ScanButton.Text = busy ? "Scanning..." : SubnetInput.Parent is null ? "Scan Now" : "Scan Network";
         SubnetInput.Enabled = !busy;
+        TimeoutInput.Enabled = !busy;
     }
     public void SetResults(IReadOnlyList<ScanHostSnapshot> rows, string status, bool error = false)
     {
@@ -48,9 +71,10 @@ internal sealed class ScanView : DashboardCard
 
 internal sealed class PingView : DashboardCard
 {
-    public TextBox TargetInput { get; } = DashboardTheme.InputBox("IP address or hostname");
+    public ComboBox TargetInput { get; } = CreateTargetInput();
     public Button PingButton { get; } = DashboardTheme.Button("Ping (4 requests)");
     private readonly Label[] _metrics = new Label[5];
+    private string _targetItemsKey = string.Empty;
     private PingResult? _shownResult;
     private readonly Label _status = DashboardTheme.Label("Select an agent, enter a target, then Ping.", 9, color: DashboardTheme.Muted);
     private readonly DataGridView _attempts = DashboardTheme.Grid(("Number", "#", 35), ("Status", "Status", 180), ("ResponseTime", "Response Time", 100));
@@ -77,6 +101,44 @@ internal sealed class PingView : DashboardCard
         layout.Controls.Add(metrics, 0, 1); layout.Controls.Add(_attempts, 0, 2); layout.Controls.Add(_status, 0, 3);
         Body.Controls.Add(layout);
     }
+
+    public void SetTargetChoices(IEnumerable<string> choices)
+    {
+        var values = choices
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var key = string.Join(";", values);
+        if (key == _targetItemsKey)
+            return;
+
+        var current = TargetInput.Text;
+        _targetItemsKey = key;
+        TargetInput.BeginUpdate();
+        try
+        {
+            TargetInput.Items.Clear();
+            TargetInput.Items.AddRange(values.Cast<object>().ToArray());
+            TargetInput.Text = current;
+        }
+        finally
+        {
+            TargetInput.EndUpdate();
+        }
+    }
+
+    private static ComboBox CreateTargetInput() => new()
+    {
+        Dock = DockStyle.Fill,
+        BackColor = DashboardTheme.Input,
+        ForeColor = DashboardTheme.Text,
+        FlatStyle = FlatStyle.Flat,
+        DropDownStyle = ComboBoxStyle.DropDown,
+        Font = new Font("Segoe UI", 11),
+        Margin = new Padding(4, 8, 8, 4),
+        AccessibleName = "Ping target IP address or hostname"
+    };
     public void SetBusy(bool enabled, bool busy)
     {
         PingButton.Enabled = enabled; PingButton.Text = busy ? "Pinging..." : "Ping (4 requests)"; TargetInput.Enabled = !busy;

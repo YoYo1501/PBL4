@@ -7,7 +7,7 @@ using NetworkAdmin.Server;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 using NetworkAdminTool.Services;
 
 internal static class Phase11Checks
@@ -172,7 +172,7 @@ internal static class Phase11Checks
         public TaskCompletionSource Canceled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string? LastSubnet { get; private set; }
         public async Task<List<NetworkDevice>> ScanNetworkAsync(string subnet, int timeoutMs = 300, string? interfaceName = null,
-            CancellationToken cancellationToken = default, IProgress<NetworkScanProgress>? progress = null)
+            CancellationToken cancellationToken = default, IProgress<NetworkAdminTool.Models.NetworkScanProgress>? progress = null)
         {
             LastSubnet = subnet; Started.TrySetResult();
             try { await Task.Delay(Timeout.Infinite, cancellationToken); return []; }

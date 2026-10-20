@@ -1,4 +1,4 @@
-namespace NetworkAdminTool.Models;
+namespace NetworkAdmin.Shared.Models;
 
 public sealed class ClientNetworkInfo
 {

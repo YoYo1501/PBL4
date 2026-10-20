@@ -1,5 +1,5 @@
 using NetworkAdmin.Shared.Messages;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdmin.Server.UI;
 

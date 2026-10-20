@@ -372,6 +372,7 @@ internal sealed class ServerDashboardForm : Form
             foreach (var nic in c?.Interfaces ?? []) _interfaces.Rows.Add(nic.Name, nic.IpAddress, nic.MacAddress, nic.Gateway, nic.Subnet, nic.Description);
             _interfaces.ClearSelection();
         }
+        UpdatePingTargetChoices(c, state);
         var prefillKey = c is null ? "" : $"{c.SessionId}|{c.PrimaryInterface?.Subnet}";
         if (_prefillKey != prefillKey)
         {
@@ -383,6 +384,24 @@ internal sealed class ServerDashboardForm : Form
         _dashboardPing.SetResult(state.Ping); _pingPage.SetResult(state.Ping);
         PingStatus(state.PingStatus, state.PingError);
         RenderScan();
+    }
+
+    private void UpdatePingTargetChoices(ClientSnapshot? client, SessionCommandState state)
+    {
+        var choices = new List<string>();
+        if (client is not null)
+        {
+            choices.Add(client.IpAddress);
+            choices.AddRange(client.Interfaces.SelectMany(networkInterface => new[]
+            {
+                networkInterface.IpAddress,
+                networkInterface.Gateway
+            }));
+        }
+
+        choices.AddRange(state.Scan?.Devices?.Select(device => device.IpAddress) ?? []);
+        _dashboardPing.SetTargetChoices(choices);
+        _pingPage.SetTargetChoices(choices);
     }
     private void RenderScan()
     {
@@ -404,9 +423,16 @@ internal sealed class ServerDashboardForm : Form
         var state = CommandsFor(c.ClientId);
         if (state.PingPending) return;
         var sessionId = c.SessionId;
-        state.PingPending = true;
         var target = _pingPage.TargetInput.Text.Trim();
         var origin = $"Agent: {c.Hostname} ({c.IpAddress}) / Session {c.SessionId[..Math.Min(8, c.SessionId.Length)]}";
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            PingStatus("Please enter an IP address or hostname before pinging.", true);
+            _pingPage.TargetInput.Focus();
+            return;
+        }
+
+        state.PingPending = true;
         state.PingError = false;
         state.PingStatus = $"Pinging {target}...\n{origin}";
         RenderSelection();
@@ -441,7 +467,7 @@ internal sealed class ServerDashboardForm : Form
         state.ScanStatus = $"Scanning...\n{origin}"; RenderSelection();
         try
         {
-            var result = await _runtime.ScanAsync(sessionId, subnet, _lifetime.Token);
+            var result = await _runtime.ScanAsync(sessionId, subnet, _lifetime.Token, (int)_scanner.TimeoutInput.Value);
             if (_closing || !IsCurrentSession(c.ClientId, sessionId, state)) return;
             if (!result.Success) throw new InvalidOperationException(result.ErrorMessage);
             state.Scan = result; state.ScanAt = DateTime.Now; state.ScanOrigin = origin;

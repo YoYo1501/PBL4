@@ -39,21 +39,22 @@ internal sealed class ClientRuntime
             await using var connection = new ServerConnection();
             using var session = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             ClientCommandHandler? handler = null;
-            Task reader = Task.CompletedTask, telemetry = Task.CompletedTask;
+            Task reader = Task.CompletedTask, telemetry = Task.CompletedTask, networkInfo = Task.CompletedTask;
             try
             {
                 using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(session.Token);
                 connectTimeout.CancelAfter(TimeSpan.FromSeconds(10));
                 await connection.ConnectAsync(_options.Host, _options.Port, connectTimeout.Token).ConfigureAwait(false);
                 retrySeconds = 1;
-                await new ClientNetworkInfoService(_networkInfoService, connection)
-                    .SendSnapshotAsync(session.Token).ConfigureAwait(false);
+                var networkInfoService = new ClientNetworkInfoService(_networkInfoService, connection);
+                await networkInfoService.SendSnapshotAsync(session.Token).ConfigureAwait(false);
                 handler = new ClientCommandHandler(_pingService, connection);
                 handler.SetScanner(_scannerService);
                 reader = connection.RunReadLoopAsync(handler.HandleAsync, session.Token);
                 telemetry = new ClientTelemetryService(_monitorService, connection, _options.TelemetryInterval)
                     .RunAsync(session.Token);
-                var completed = await Task.WhenAny(reader, telemetry).ConfigureAwait(false);
+                networkInfo = networkInfoService.RunAsync(_options.NetworkInfoInterval, session.Token);
+                var completed = await Task.WhenAny(reader, telemetry, networkInfo).ConfigureAwait(false);
                 await completed.ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
@@ -67,6 +68,7 @@ internal sealed class ClientRuntime
                 await connection.DisconnectAsync().ConfigureAwait(false);
                 await ObserveStoppedTaskAsync(reader).ConfigureAwait(false);
                 await ObserveStoppedTaskAsync(telemetry).ConfigureAwait(false);
+                await ObserveStoppedTaskAsync(networkInfo).ConfigureAwait(false);
                 if (handler is not null) await handler.DrainAsync().ConfigureAwait(false);
             }
             try { await Task.Delay(TimeSpan.FromSeconds(retrySeconds), _shutdown.Token).ConfigureAwait(false); }

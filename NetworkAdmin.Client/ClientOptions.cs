@@ -5,6 +5,7 @@ internal sealed class ClientOptions
     public string Host { get; init; } = "127.0.0.1";
     public int Port { get; init; } = 5000;
     public TimeSpan TelemetryInterval { get; init; } = TimeSpan.FromSeconds(2);
+    public TimeSpan NetworkInfoInterval { get; init; } = TimeSpan.FromSeconds(15);
 
     public static ClientOptions Load(string[] args)
     {
@@ -27,11 +28,19 @@ internal sealed class ClientOptions
             ? TimeSpan.FromSeconds(intervalSeconds)
             : TimeSpan.FromSeconds(2);
 
+        var networkInfoIntervalText = GetValue(args, "--network-info-interval-seconds")
+            ?? Environment.GetEnvironmentVariable("NETWORKADMIN_NETWORK_INFO_INTERVAL_SECONDS");
+        var networkInfoInterval = int.TryParse(networkInfoIntervalText, out var networkInfoIntervalSeconds)
+            && networkInfoIntervalSeconds > 0
+            ? TimeSpan.FromSeconds(networkInfoIntervalSeconds)
+            : TimeSpan.FromSeconds(15);
+
         return new ClientOptions
         {
             Host = host,
             Port = port,
-            TelemetryInterval = interval
+            TelemetryInterval = interval,
+            NetworkInfoInterval = networkInfoInterval
         };
     }
 

@@ -5,7 +5,7 @@ using NetworkAdmin.Server.UI;
 using NetworkAdmin.Client.Services;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 using NetworkAdminTool.Services;
 
 var checks = 0;

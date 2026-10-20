@@ -1,4 +1,4 @@
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdmin.Shared.Messages;
 

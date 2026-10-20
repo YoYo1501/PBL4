@@ -1,4 +1,4 @@
-namespace NetworkAdminTool.Models
+namespace NetworkAdmin.Shared.Models
 {
     /// <summary>
     /// Dữ liệu thuần mô tả kết quả sau khi ping một host.

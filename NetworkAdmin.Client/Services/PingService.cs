@@ -1,6 +1,6 @@
 using System.Net.NetworkInformation;
 using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
+using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdminTool.Services
 {
