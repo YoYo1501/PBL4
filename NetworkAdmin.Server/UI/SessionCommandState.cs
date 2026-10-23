@@ -20,4 +20,7 @@ internal sealed class SessionCommandState
     public string RemoteInfoStatus { get; set; } = "No remote command executed for this session.";
     public bool RemoteInfoError { get; set; }
     public bool RemoteInfoPending { get; set; }
+    public string PowerStatus { get; set; } = "No shutdown or restart command executed for this session.";
+    public bool PowerError { get; set; }
+    public bool PowerPending { get; set; }
 }

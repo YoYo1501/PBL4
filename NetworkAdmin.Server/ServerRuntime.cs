@@ -95,6 +95,27 @@ internal sealed class ServerRuntime
             token);
     }
 
+    public Task<RemoteAdministrationResultMessage> PowerClientAsync(
+        string clientId,
+        RemoteAdministrationCommandType command,
+        int countdownSeconds,
+        CancellationToken token,
+        Action<RemoteAdministrationResultMessage>? progress = null,
+        TimeSpan? timeout = null)
+    {
+        if (!RemoteAdministrationCommandPolicy.IsPowerCommand(command))
+            throw new ArgumentException("Only Shutdown or Restart is supported by this operation.", nameof(command));
+
+        return _dispatcher.SendRemoteAdministrationCommandAsync(
+            clientId,
+            command,
+            _adminToken,
+            timeout ?? TimeSpan.FromSeconds(90),
+            token,
+            RemoteAdministrationCommandPolicy.ClampCountdown(countdownSeconds),
+            progress);
+    }
+
     public static IReadOnlyList<ScanHostSnapshot> MatchScan(ScanResultMessage result, IReadOnlyList<ClientSnapshot> clients) =>
         result.Devices.Select(device =>
         {

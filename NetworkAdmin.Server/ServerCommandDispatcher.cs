@@ -123,7 +123,9 @@ internal sealed class ServerCommandDispatcher
         RemoteAdministrationCommandType command,
         string authorizationToken,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int countdownSeconds = RemoteAdministrationCommandPolicy.DefaultCountdownSeconds,
+        Action<RemoteAdministrationResultMessage>? progress = null)
     {
         if (string.IsNullOrWhiteSpace(clientId))
             return RemoteResult(command, RemoteAdministrationCommandStatus.Rejected, "ClientId is required.");
@@ -135,12 +137,16 @@ internal sealed class ServerCommandDispatcher
             return RemoteResult(command, RemoteAdministrationCommandStatus.Rejected, "Client is not connected.");
 
         var requestId = Guid.NewGuid().ToString("N");
-        var pending = new PendingRemoteCommand(session.ClientId, session.SessionId, command);
+        var pending = new PendingRemoteCommand(session.ClientId, session.SessionId, command)
+        {
+            Progress = progress
+        };
         if (!_pendingRemoteCommands.TryAdd(requestId, pending))
             return RemoteResult(command, RemoteAdministrationCommandStatus.Failed, "Unable to track remote command.");
 
         _auditLog.Write(session.ClientId, session.SessionId, command,
             RemoteAdministrationCommandStatus.Accepted, $"requestId={requestId}; dispatched");
+        progress?.Invoke(RemoteResult(command, RemoteAdministrationCommandStatus.Accepted, "Command sent to client."));
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(timeout);
@@ -153,7 +159,8 @@ internal sealed class ServerCommandDispatcher
                 new RemoteAdministrationCommandMessage
                 {
                     Command = command,
-                    AuthorizationToken = authorizationToken
+                    AuthorizationToken = authorizationToken,
+                    CountdownSeconds = RemoteAdministrationCommandPolicy.ClampCountdown(countdownSeconds)
                 },
                 timeoutCts.Token).ConfigureAwait(false);
 
@@ -221,8 +228,9 @@ internal sealed class ServerCommandDispatcher
 
         _auditLog.Write(pending.ClientId, sessionId, result.Command, result.Status,
             string.IsNullOrWhiteSpace(result.ErrorMessage) ? result.Result : result.ErrorMessage);
+        pending.Progress?.Invoke(result);
 
-        if (result.Status == RemoteAdministrationCommandStatus.Accepted)
+        if (result.Status is RemoteAdministrationCommandStatus.Accepted or RemoteAdministrationCommandStatus.Preparing)
             return true;
 
         return pending.Completion.TrySetResult(result);
@@ -302,6 +310,7 @@ internal sealed class ServerCommandDispatcher
         public string ClientId { get; }
         public string SessionId { get; }
         public RemoteAdministrationCommandType Command { get; }
+        public Action<RemoteAdministrationResultMessage>? Progress { get; set; }
         public TaskCompletionSource<RemoteAdministrationResultMessage> Completion { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
