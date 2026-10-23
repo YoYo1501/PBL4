@@ -2,7 +2,9 @@ namespace NetworkAdmin.Shared.Messages;
 
 public enum RemoteAdministrationCommandType
 {
-    GetAgentInfo = 1
+    GetAgentInfo = 1,
+    Shutdown = 2,
+    Restart = 3
 }
 
 public enum RemoteAdministrationCommandStatus
@@ -11,13 +13,15 @@ public enum RemoteAdministrationCommandStatus
     Rejected = 2,
     Completed = 3,
     Failed = 4,
-    Timeout = 5
+    Timeout = 5,
+    Preparing = 6
 }
 
 public sealed class RemoteAdministrationCommandMessage
 {
     public RemoteAdministrationCommandType Command { get; set; }
     public string AuthorizationToken { get; set; } = string.Empty;
+    public int CountdownSeconds { get; set; } = RemoteAdministrationCommandPolicy.DefaultCountdownSeconds;
 }
 
 public sealed class RemoteAdministrationCancelMessage

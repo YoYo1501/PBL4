@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using NetworkAdmin.Shared.Protocol;
@@ -17,6 +19,7 @@ internal sealed class ClientCommandHandler
     private readonly ConcurrentDictionary<Task, byte> _runningTasks = new();
     private readonly ConcurrentDictionary<string, byte> _remoteCommandIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _remoteCancellations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _activePowerRequests = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _scanSync = new();
     private INetworkScannerService? _scannerService;
     private Task _scanTask = Task.CompletedTask;
@@ -106,6 +109,7 @@ internal sealed class ClientCommandHandler
     {
         RemoteAdministrationCommandMessage? request = null;
         CancellationTokenSource? commandCancellation = null;
+        var powerCommandEntered = false;
         try
         {
             if (string.IsNullOrWhiteSpace(envelope.RequestId))
@@ -130,12 +134,22 @@ internal sealed class ClientCommandHandler
                 return;
             }
 
-            if (request.Command != RemoteAdministrationCommandType.GetAgentInfo)
+            var validationError = RemoteAdministrationCommandPolicy.Validate(request);
+            if (validationError is not null)
             {
                 await SendRemoteResultAsync(envelope.RequestId, request.Command,
-                    RemoteAdministrationCommandStatus.Rejected, "Remote command is not permitted on this client.", cancellationToken).ConfigureAwait(false);
+                    RemoteAdministrationCommandStatus.Rejected, validationError, cancellationToken).ConfigureAwait(false);
                 return;
             }
+
+            if (RemoteAdministrationCommandPolicy.IsPowerCommand(request.Command)
+                && !_activePowerRequests.TryAdd(envelope.RequestId, 0))
+            {
+                await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                    RemoteAdministrationCommandStatus.Rejected, "Another shutdown or restart command is already running.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            powerCommandEntered = RemoteAdministrationCommandPolicy.IsPowerCommand(request.Command);
 
             commandCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             if (!_remoteCancellations.TryAdd(envelope.RequestId, commandCancellation))
@@ -148,11 +162,18 @@ internal sealed class ClientCommandHandler
             await SendRemoteResultAsync(envelope.RequestId, request.Command,
                 RemoteAdministrationCommandStatus.Accepted, string.Empty, commandCancellation.Token).ConfigureAwait(false);
 
-            var result = $"ClientId={_connection.ClientId}; ClientName={_connection.ClientName}; " +
-                         $"SessionId={_connection.SessionId}; MachineName={Environment.MachineName}; " +
-                         $"OS={Environment.OSVersion}";
-            await SendRemoteResultAsync(envelope.RequestId, request.Command,
-                RemoteAdministrationCommandStatus.Completed, result, commandCancellation.Token).ConfigureAwait(false);
+            if (request.Command == RemoteAdministrationCommandType.GetAgentInfo)
+            {
+                var result = $"ClientId={_connection.ClientId}; ClientName={_connection.ClientName}; " +
+                             $"SessionId={_connection.SessionId}; MachineName={Environment.MachineName}; " +
+                             $"OS={Environment.OSVersion}";
+                await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                    RemoteAdministrationCommandStatus.Completed, result, commandCancellation.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                await ExecutePowerCommandAsync(envelope.RequestId, request, commandCancellation.Token).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException ex)
         {
@@ -174,6 +195,8 @@ internal sealed class ClientCommandHandler
         {
             if (_remoteCancellations.TryRemove(envelope.RequestId, out var cancellation))
                 cancellation.Dispose();
+            if (powerCommandEntered)
+                _activePowerRequests.TryRemove(envelope.RequestId, out _);
         }
     }
 
@@ -186,6 +209,8 @@ internal sealed class ClientCommandHandler
                 && _remoteCancellations.TryGetValue(envelope.RequestId, out var cancellation))
             {
                 cancellation.Cancel();
+                if (_activePowerRequests.ContainsKey(envelope.RequestId))
+                    TryAbortWindowsShutdown();
                 Console.WriteLine($"Remote command canceled: {envelope.RequestId} ({request.Reason})");
             }
         }
@@ -208,11 +233,57 @@ internal sealed class ClientCommandHandler
                 Command = command ?? default,
                 Status = status,
                 ClientId = _connection.ClientId,
-                Result = status == RemoteAdministrationCommandStatus.Completed ? message : string.Empty,
-                ErrorMessage = status == RemoteAdministrationCommandStatus.Completed ? string.Empty : message,
+                Result = status is RemoteAdministrationCommandStatus.Completed or RemoteAdministrationCommandStatus.Preparing
+                    ? message : string.Empty,
+                ErrorMessage = status is RemoteAdministrationCommandStatus.Completed or RemoteAdministrationCommandStatus.Preparing
+                    ? string.Empty : message,
                 TimestampUtc = DateTime.UtcNow
             }, cancellationToken).ConfigureAwait(false);
     }
+
+    private async Task ExecutePowerCommandAsync(
+        string requestId,
+        RemoteAdministrationCommandMessage request,
+        CancellationToken cancellationToken)
+    {
+        var countdown = RemoteAdministrationCommandPolicy.ClampCountdown(request.CountdownSeconds);
+        await SendRemoteResultAsync(requestId, request.Command,
+            RemoteAdministrationCommandStatus.Preparing,
+            $"Preparing {request.Command} in {countdown} seconds. Applications will not be force-closed.",
+            cancellationToken).ConfigureAwait(false);
+
+        await Task.Delay(TimeSpan.FromSeconds(countdown), cancellationToken).ConfigureAwait(false);
+        var reboot = request.Command == RemoteAdministrationCommandType.Restart;
+        if (!OperatingSystem.IsWindows() || !InitiateSystemShutdownEx(
+                null,
+                reboot ? "NetworkAdmin requested a restart." : "NetworkAdmin requested a shutdown.",
+                0,
+                false,
+                reboot,
+                0x80000004))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows rejected the shutdown/restart request.");
+        }
+
+        await SendRemoteResultAsync(requestId, request.Command,
+            RemoteAdministrationCommandStatus.Completed,
+            "Windows accepted the power command. Final shutdown/restart state is not confirmed by the agent.",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void TryAbortWindowsShutdown()
+    {
+        try { AbortSystemShutdown(null); }
+        catch (Exception ex) { Console.WriteLine($"Unable to cancel Windows shutdown: {ex.Message}"); }
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool InitiateSystemShutdownEx(
+        string? machineName, string message, uint timeout, bool forceAppsClosed,
+        bool reboot, uint reason);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool AbortSystemShutdown(string? machineName);
 
     private bool IsAuthorized(string token)
     {

@@ -1,6 +1,8 @@
 ﻿using NetworkAdmin.Server.UI;
 using System.Runtime.InteropServices;
 
+using NetworkAdmin.Shared.Messages;
+
 namespace NetworkAdmin.Server;
 
 internal sealed class ServerDashboardForm : Form
@@ -41,6 +43,21 @@ internal sealed class ServerDashboardForm : Form
     private readonly PingView _pingPage = new(true);
     private readonly Button _agentInfoButton = DashboardTheme.Button("Get Agent Info");
     private readonly Label _agentInfoStatus = DashboardTheme.Label("No remote command executed for this session.", 9, color: DashboardTheme.Muted);
+    private readonly Button _shutdownButton = DashboardTheme.Button("Shutdown", false);
+    private readonly Button _restartButton = DashboardTheme.Button("Restart", false);
+    private readonly Button _cancelPowerButton = DashboardTheme.Button("Cancel", false);
+    private readonly NumericUpDown _powerCountdown = new()
+    {
+        Minimum = RemoteAdministrationCommandPolicy.MinimumCountdownSeconds,
+        Maximum = RemoteAdministrationCommandPolicy.MaximumCountdownSeconds,
+        Value = RemoteAdministrationCommandPolicy.DefaultCountdownSeconds,
+        Dock = DockStyle.Fill,
+        BackColor = DashboardTheme.Input,
+        ForeColor = DashboardTheme.Text,
+        Margin = new Padding(4),
+        TextAlign = HorizontalAlignment.Center
+    };
+    private readonly Label _powerStatus = DashboardTheme.Label("No shutdown or restart command executed for this session.", 9, color: DashboardTheme.Muted);
     private readonly DataGridView _clients = DashboardTheme.Grid(("Status", "Status", 80), ("Hostname", "Hostname", 160),
         ("IPv4", "IPv4", 115), ("MAC", "MAC", 140), ("CPU", "CPU", 60), ("RAM", "RAM", 60), ("LastSeen", "Last Seen", 140));
     private readonly DataGridView _interfaces = DashboardTheme.Grid(("Name", "Interface", 110), ("IpAddress", "IPv4", 105),
@@ -66,6 +83,8 @@ internal sealed class ServerDashboardForm : Form
     private Task? _pingTask;
     private Task? _scanTask;
     private Task? _agentInfoTask;
+    private Task? _powerTask;
+    private CancellationTokenSource? _powerCancellation;
 
     public ServerDashboardForm(ServerRuntime runtime)
     {
@@ -130,6 +149,9 @@ internal sealed class ServerDashboardForm : Form
         _pingPage.PingButton.Click += (_, _) => _pingTask = PingAsync();
         _scanner.ScanButton.Click += (_, _) => _scanTask = ScanAsync();
         _agentInfoButton.Click += (_, _) => _agentInfoTask = GetAgentInfoAsync();
+        _shutdownButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Shutdown);
+        _restartButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Restart);
+        _cancelPowerButton.Click += (_, _) => _powerCancellation?.Cancel();
         _dashboardScan.ScanButton.Click += (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(_scanner.SubnetInput.Text)) { Navigate("IP Scanner"); _scanner.SubnetInput.Focus(); }
@@ -229,18 +251,30 @@ internal sealed class ServerDashboardForm : Form
 
     private Control BuildClients()
     {
-        var page = DashboardTheme.Rows(-100, 280, 190, 78);
+        var page = DashboardTheme.Rows(-100, 280, 190, 126);
         var fleet = new DashboardCard("Managed Stations / Select a row to manage that session"); fleet.Body.Controls.Add(_clients);
         page.Controls.Add(fleet, 0, 0); page.Controls.Add(_clientsDetail, 0, 1);
         var adapters = new DashboardCard("All Reported Interfaces / Physical and virtual adapters"); adapters.Body.Controls.Add(_interfaces);
         page.Controls.Add(adapters, 0, 2);
-        var remote = new DashboardCard("Remote Administration / Read-only command");
-        var remoteRow = DashboardTheme.Table(2, 1);
-        remoteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
-        remoteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        remoteRow.Controls.Add(_agentInfoButton, 0, 0);
-        remoteRow.Controls.Add(_agentInfoStatus, 1, 0);
-        remote.Body.Controls.Add(remoteRow);
+        var remote = new DashboardCard("Remote Administration / Read-only and power commands");
+        var remoteRows = DashboardTheme.Rows(38, 30, 30);
+        var remoteActions = DashboardTheme.Table(5, 1);
+        foreach (var width in new[] { 155, 125, 125, 105, 120 })
+            remoteActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+        remoteActions.Controls.Add(_agentInfoButton, 0, 0);
+        remoteActions.Controls.Add(_shutdownButton, 1, 0);
+        remoteActions.Controls.Add(_restartButton, 2, 0);
+        remoteActions.Controls.Add(_cancelPowerButton, 3, 0);
+        var countdown = DashboardTheme.Table(2, 1);
+        countdown.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));
+        countdown.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        countdown.Controls.Add(DashboardTheme.Label("Delay (s)", 8, color: DashboardTheme.Muted), 0, 0);
+        countdown.Controls.Add(_powerCountdown, 1, 0);
+        remoteActions.Controls.Add(countdown, 4, 0);
+        remoteRows.Controls.Add(remoteActions, 0, 0);
+        remoteRows.Controls.Add(_agentInfoStatus, 0, 1);
+        remoteRows.Controls.Add(_powerStatus, 0, 2);
+        remote.Body.Controls.Add(remoteRows);
         page.Controls.Add(remote, 0, 3);
         return page;
     }
@@ -338,8 +372,10 @@ internal sealed class ServerDashboardForm : Form
                 {
                     if (state.PingPending) state.PingStatus = "Previous session Ping interrupted after reconnect.";
                     if (state.ScanPending) state.ScanStatus = "Previous session scan interrupted after reconnect.";
+                    if (state.PowerPending) state.PowerStatus = "Previous session power command interrupted after reconnect.";
                     state.PingPending = false;
                     state.ScanPending = false;
+                    state.PowerPending = false;
                 }
                 state.SessionId = c.SessionId;
             }
@@ -381,6 +417,12 @@ internal sealed class ServerDashboardForm : Form
         _agentInfoButton.Text = state.RemoteInfoPending ? "Reading..." : "Get Agent Info";
         _agentInfoStatus.Text = state.RemoteInfoStatus;
         _agentInfoStatus.ForeColor = state.RemoteInfoError ? DashboardTheme.Red : DashboardTheme.Muted;
+        _shutdownButton.Enabled = enabled && !state.PowerPending;
+        _restartButton.Enabled = enabled && !state.PowerPending;
+        _cancelPowerButton.Enabled = enabled && state.PowerPending;
+        _powerCountdown.Enabled = enabled && !state.PowerPending;
+        _powerStatus.Text = state.PowerStatus;
+        _powerStatus.ForeColor = state.PowerError ? DashboardTheme.Red : DashboardTheme.Muted;
         var key = c?.SessionId + string.Join(";", c?.Interfaces ?? []);
         if (_interfaceKey != key)
         {
@@ -533,6 +575,87 @@ internal sealed class ServerDashboardForm : Form
             if (!_closing) RefreshState();
         }
     }
+    private async Task PowerAsync(RemoteAdministrationCommandType command)
+    {
+        var client = Selected;
+        if (client?.Connected != true) return;
+        var state = CommandsFor(client.ClientId);
+        if (state.PowerPending) return;
+
+        var action = command == RemoteAdministrationCommandType.Restart ? "restart" : "shut down";
+        var countdown = (int)_powerCountdown.Value;
+        var confirmation = MessageBox.Show(this,
+            $"Are you sure you want to {action} '{client.Hostname}'?\n\n"
+            + $"The command will start after {countdown} seconds. Applications will not be force-closed.",
+            $"Confirm {action}", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (confirmation != DialogResult.Yes) return;
+
+        var sessionId = client.SessionId;
+        state.PowerPending = true;
+        state.PowerError = false;
+        state.PowerStatus = $"Sending {action} command to {client.Hostname}...";
+        RenderSelection();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _powerCancellation = cancellation;
+        try
+        {
+            var result = await _runtime.PowerClientAsync(
+                client.ClientId,
+                command,
+                countdown,
+                cancellation.Token,
+                progress: update => UpdatePowerProgress(client.ClientId, sessionId, state, update));
+            if (_closing || !IsCurrentSession(client.ClientId, sessionId, state)) return;
+            state.PowerError = result.Status != RemoteAdministrationCommandStatus.Completed;
+            state.PowerStatus = FormatPowerResult(action, result);
+        }
+        catch (Exception ex)
+        {
+            if (!_closing && IsCurrentSession(client.ClientId, sessionId, state))
+            {
+                state.PowerError = true;
+                state.PowerStatus = $"{action} command failed: {ex.Message}";
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_powerCancellation, cancellation)) _powerCancellation = null;
+            if (state.SessionId == sessionId) state.PowerPending = false;
+            if (!_closing) RefreshState();
+        }
+    }
+
+    private void UpdatePowerProgress(string clientId, string sessionId, SessionCommandState state,
+        RemoteAdministrationResultMessage result)
+    {
+        if (_closing || IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (_closing || !IsCurrentSession(clientId, sessionId, state)) return;
+                state.PowerError = result.Status is RemoteAdministrationCommandStatus.Rejected
+                    or RemoteAdministrationCommandStatus.Failed or RemoteAdministrationCommandStatus.Timeout;
+                state.PowerStatus = result.Status switch
+                {
+                    RemoteAdministrationCommandStatus.Accepted when result.ErrorMessage == "Command sent to client."
+                        => "Command sent to client; waiting for acceptance...",
+                    RemoteAdministrationCommandStatus.Accepted => "Client accepted the command; waiting to prepare...",
+                    RemoteAdministrationCommandStatus.Preparing => "Client accepted the command and is preparing Windows power action...",
+                    _ => FormatPowerResult("power", result)
+                };
+                RenderSelection();
+            }));
+        }
+        catch (InvalidOperationException) { }
+    }
+
+    private static string FormatPowerResult(string action, RemoteAdministrationResultMessage result) =>
+        result.Status == RemoteAdministrationCommandStatus.Completed
+            ? result.Result
+            : $"{action} command {result.Status}: {result.ErrorMessage}";
+
     private bool IsCurrentSession(string clientId, string sessionId, SessionCommandState state) =>
         state.SessionId == sessionId && _runtime.GetClients().Any(c =>
             string.Equals(c.ClientId, clientId, StringComparison.OrdinalIgnoreCase) && c.SessionId == sessionId && c.Connected);
@@ -544,9 +667,10 @@ internal sealed class ServerDashboardForm : Form
         _closing = true; _refresh.Stop(); Enabled = false;
         try
         {
+            _powerCancellation?.Cancel();
             await _lifetime.CancelAsync(); await _runtime.StopAsync();
             await Task.WhenAll(_pingTask ?? Task.CompletedTask, _scanTask ?? Task.CompletedTask,
-                _agentInfoTask ?? Task.CompletedTask);
+                _agentInfoTask ?? Task.CompletedTask, _powerTask ?? Task.CompletedTask);
         }
         catch (Exception ex) { Console.WriteLine($"Server shutdown: {ex.Message}"); }
         finally { _closed = true; Close(); }
