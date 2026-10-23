@@ -116,6 +116,22 @@ internal sealed class ServerRuntime
             progress);
     }
 
+    public Task<RemoteAdministrationResultMessage> SendRemoteAdministrationAsync(
+        string clientId,
+        RemoteAdministrationCommandType command,
+        CancellationToken token,
+        Action<RemoteAdministrationResultMessage>? progress = null,
+        TimeSpan? timeout = null)
+    {
+        return _dispatcher.SendRemoteAdministrationCommandAsync(
+            clientId,
+            command,
+            _adminToken,
+            timeout ?? TimeSpan.FromSeconds(30),
+            token,
+            progress: progress);
+    }
+
     public static IReadOnlyList<ScanHostSnapshot> MatchScan(ScanResultMessage result, IReadOnlyList<ClientSnapshot> clients) =>
         result.Devices.Select(device =>
         {
