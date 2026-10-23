@@ -9,10 +9,20 @@ public static class RemoteAdministrationCommandPolicy
     public static bool IsSupported(RemoteAdministrationCommandType command) =>
         command is RemoteAdministrationCommandType.GetAgentInfo
             or RemoteAdministrationCommandType.Shutdown
-            or RemoteAdministrationCommandType.Restart;
+            or RemoteAdministrationCommandType.Restart
+            or RemoteAdministrationCommandType.WindowsLock
+            or RemoteAdministrationCommandType.WindowsUnlock
+            or RemoteAdministrationCommandType.ManagedWorkstationLock
+            or RemoteAdministrationCommandType.ManagedWorkstationUnlock;
 
     public static bool IsPowerCommand(RemoteAdministrationCommandType command) =>
         command is RemoteAdministrationCommandType.Shutdown or RemoteAdministrationCommandType.Restart;
+
+    public static bool IsLockCommand(RemoteAdministrationCommandType command) =>
+        command is RemoteAdministrationCommandType.WindowsLock
+            or RemoteAdministrationCommandType.WindowsUnlock
+            or RemoteAdministrationCommandType.ManagedWorkstationLock
+            or RemoteAdministrationCommandType.ManagedWorkstationUnlock;
 
     public static int ClampCountdown(int seconds) => Math.Clamp(
         seconds <= 0 ? DefaultCountdownSeconds : seconds,

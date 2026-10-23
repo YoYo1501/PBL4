@@ -4,7 +4,11 @@ public enum RemoteAdministrationCommandType
 {
     GetAgentInfo = 1,
     Shutdown = 2,
-    Restart = 3
+    Restart = 3,
+    WindowsLock = 4,
+    WindowsUnlock = 5,
+    ManagedWorkstationLock = 6,
+    ManagedWorkstationUnlock = 7
 }
 
 public enum RemoteAdministrationCommandStatus

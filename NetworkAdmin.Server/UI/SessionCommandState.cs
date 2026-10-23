@@ -23,4 +23,7 @@ internal sealed class SessionCommandState
     public string PowerStatus { get; set; } = "No shutdown or restart command executed for this session.";
     public bool PowerError { get; set; }
     public bool PowerPending { get; set; }
+    public string LockStatus { get; set; } = "No lock command executed for this session.";
+    public bool LockError { get; set; }
+    public bool LockPending { get; set; }
 }

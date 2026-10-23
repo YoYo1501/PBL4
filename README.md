@@ -77,6 +77,15 @@ phía, trả `Accepted` rồi `Completed`, và ghi audit vào
 `Logs/remote-administration.log` cạnh file chạy Server. Có thể truyền token
 bằng `--admin-token` thay cho biến môi trường.
 
+Dashboard cũng có nhóm lệnh Lock/Unlock. `Windows Lock` gọi API
+`LockWorkStation`; người dùng chỉ có thể mở khóa bằng cơ chế đăng nhập Windows
+hợp lệ. Ứng dụng cố ý không hỗ trợ tự mở khóa, lưu mật khẩu hoặc vượt màn hình
+đăng nhập. `Managed Workstation Lock` chỉ được phép khi đã cấu hình kiosk/
+Assigned Access hoặc policy Windows được hỗ trợ; bản hiện tại từ chối an toàn
+và không thay đổi máy nếu policy đó chưa có, thay vì tạo màn hình khóa tự chế có
+nguy cơ khóa vĩnh viễn khi mất kết nối. Mọi lệnh đều xác thực token, kiểm tra
+session, ghi audit và không tự gửi lại sau reconnect.
+
 Để chỉ nhận kết nối từ chính máy Server, khởi chạy với `--host 127.0.0.1`:
 
 ```powershell
