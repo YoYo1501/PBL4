@@ -1,9 +1,28 @@
+# Visual Studio
 .vs/
+
+# .NET build
 bin/
 obj/
+**/bin/
+**/obj/
+
+# Logs
 Logs/
+
+# Generated artifacts
 artifacts/layout/
 
+# Published applications
+/publish/
+
+# Installer output
+/Releases/
+
+# Inno Setup temporary files
+*.is~
+
+# Visual Studio user files
 *.user
 *.suo
 *.userosscache
