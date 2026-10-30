@@ -3,4 +3,5 @@
   <Project Path="NetworkAdmin.Server\NetworkAdmin.Server.csproj" />
   <Project Path="NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
   <Project Path="NetworkAdmin.Shared.Tests\NetworkAdmin.Shared.Tests.csproj" />
+  <Project Path="NetworkAdmin.Client.Tests\NetworkAdmin.Client.Tests.csproj" />
 </Solution>

@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using NetworkAdmin.Client;
 using NetworkAdmin.Client.Services;
 using NetworkAdmin.Server;
+using NetworkAdmin.Server.UI;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdminTool.Interfaces;
@@ -49,7 +50,9 @@ internal static class Phase11Checks
             catch (OperationCanceledException) { check(probes.Calls == 1020, "Phase 11: canceled scan does not start probes"); }
         }
         await CheckReconnectAsync(check, network);
+        CheckDashboardPresenterSessionState(check);
         await CheckTimeoutAsync(check);
+        await CheckShutdownClosesIdleClientAsync(check);
     }
 
     private static async Task CheckReconnectAsync(Action<bool, string> check, INetworkInfoService network)
@@ -69,6 +72,21 @@ internal static class Phase11Checks
             await Eventually(() => server.GetClients().Any(c => c.Connected && c.Cpu == 17));
             var first = server.GetClients().Single(c => c.Connected);
             check(first.Interfaces.Count > 0, "Phase 11: actual ClientRuntime retries initial failure and sends network info/telemetry");
+            var dashboard = new ServerDashboardPresenter(server);
+            dashboard.ObserveClients(server.GetClients());
+            await dashboard.PingAsync(first, "127.0.0.1", default, () => false, () => { }, () => { });
+            var dashboardState = dashboard.CommandsFor(first.ClientId);
+            check(dashboardState.Ping is { Sent: 4, Received: 4 } && !dashboardState.PingPending,
+                "Phase 11: dashboard presenter completes Ping for the captured client session");
+            await dashboard.GetAgentInfoAsync(first, default, () => false, () => { }, () => { });
+            check(dashboardState.RemoteInfoError && dashboardState.RemoteInfoStatus.Contains("Rejected"),
+                "Phase 11: dashboard presenter surfaces rejected Remote Administration result");
+            await dashboard.PowerAsync(first, RemoteAdministrationCommandType.Shutdown,
+                RemoteAdministrationCommandPolicy.MinimumCountdownSeconds, default, () => false,
+                () => { }, () => { }, (_, _, _, _) => { });
+            check(dashboardState.PowerError && !dashboardState.PowerPending
+                && dashboardState.PowerStatus.Contains("not configured", StringComparison.OrdinalIgnoreCase),
+                "Phase 11: dashboard presenter surfaces rejected power command without scheduling it");
             var oldSession = first.SessionId;
             var manager = (ClientManager)typeof(ServerRuntime).GetField("_clients", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(server)!;
             manager.TryGet(oldSession, out var connected);
@@ -79,8 +97,30 @@ internal static class Phase11Checks
             check(server.GetClients().Count(c => c.ClientId == connected.ClientId) == 1
                 && first.SessionId != oldSession && first.ClientId == connected.ClientId,
                 "Phase 11: actual ClientRuntime recovers from unexpected socket reset without duplicate client rows");
+            for (var reconnect = 1; reconnect <= 3; reconnect++)
+            {
+                var staleSessionId = first.SessionId;
+                manager.TryGet(staleSessionId, out var staleSession);
+                staleSession!.Stream.Socket.LingerState = new LingerOption(true, 0);
+                staleSession.Stream.Dispose();
+                await Eventually(() => server.GetClients().Any(c => c.Connected
+                    && c.ClientId == first.ClientId && c.SessionId != staleSessionId && c.Cpu == 17));
+
+                // Simulate the old handler's delayed finally block after its replacement is active.
+                manager.Remove(staleSessionId);
+                first = server.GetClients().Single(c => c.Connected && c.ClientId == connected.ClientId);
+                dashboard.ObserveClients(server.GetClients());
+                check(first.SessionId != staleSessionId
+                    && manager.TryGet(first.SessionId, out var activeSession) && activeSession is { IsReady: true }
+                    && server.GetClients().Count(c => c.ClientId == connected.ClientId) == 1,
+                    $"Phase 11: reconnect {reconnect} keeps one active client when stale session cleanup arrives late");
+            }
             var pendingScan = server.ScanAsync(first.SessionId, "172.31.99.116/23", default);
             await blocking.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await dashboard.ScanAsync(first, "172.31.98.0/23", ScanSubnet.DefaultTimeoutMs, default,
+                () => false, () => { }, () => { });
+            check(dashboardState.ScanError && dashboardState.ScanStatus.Contains("already running", StringComparison.OrdinalIgnoreCase),
+                "Phase 11: dashboard presenter surfaces an active-scan rejection");
             var secondScan = await server.ScanAsync(first.SessionId, "172.31.98.0/23", default);
             check(!secondScan.Success && secondScan.ErrorMessage.Contains("already running") && blocking.LastSubnet == "172.31.98.0/23",
                 "Phase 11: /23 normalized through real remote command path; overlapping scans rejected");
@@ -109,6 +149,26 @@ internal static class Phase11Checks
         }
     }
 
+    private static void CheckDashboardPresenterSessionState(Action<bool, string> check)
+    {
+        var now = DateTime.UtcNow;
+        var presenter = new ServerDashboardPresenter(new ServerRuntime(new ServerOptions { Host = IPAddress.Loopback }));
+        var first = new ClientSnapshot("session-1", "client-1", "agent", "127.0.0.1", true,
+            now, now, now, 12, 34, []);
+        presenter.ObserveClients([first]);
+        var state = presenter.CommandsFor(first.ClientId);
+        state.PingPending = state.ScanPending = state.PowerPending = true;
+        presenter.ObserveClients([first with { SessionId = "session-2", LastSeen = now.AddSeconds(1),
+            LastTelemetryAt = now.AddSeconds(1), Cpu = 20 }]);
+        check(state.SessionId == "session-2" && !state.PingPending && !state.ScanPending && !state.PowerPending
+            && state.PingStatus.Contains("interrupted") && state.ScanStatus.Contains("interrupted")
+            && state.PowerStatus.Contains("interrupted") && presenter.TelemetryFor(first.ClientId).Count == 2,
+            "Phase 11: dashboard presenter resets pending commands on session replacement and retains telemetry samples");
+        presenter.ObserveClients([]);
+        check(!presenter.Commands.ContainsKey(first.ClientId) && presenter.TelemetryFor(first.ClientId).Count == 0,
+            "Phase 11: dashboard presenter releases state and telemetry for removed clients");
+    }
+
     private static async Task CheckTimeoutAsync(Action<bool, string> check)
     {
         var manager = new ClientManager();
@@ -132,6 +192,25 @@ internal static class Phase11Checks
             }
         }
         finally { session.SendLock.Release(); }
+    }
+
+    private static async Task CheckShutdownClosesIdleClientAsync(Action<bool, string> check)
+    {
+        var port = ReservePort();
+        var server = new ServerRuntime(new ServerOptions { Host = IPAddress.Loopback, Port = port });
+        server.Start();
+        await Eventually(() => server.IsRunning);
+
+        using var peer = new TcpClient();
+        await peer.ConnectAsync(IPAddress.Loopback, port);
+        // A partial frame leaves the handler blocked in its hello read until shutdown.
+        await peer.GetStream().WriteAsync("{"u8.ToArray());
+        await Task.Delay(100);
+
+        await server.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var read = await peer.GetStream().ReadAsync(new byte[1]).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        check(read == 0 && !server.IsRunning,
+            "Phase 11: shutdown closes a client blocked in the hello frame and awaits its handler");
     }
 
     private static int ReservePort()

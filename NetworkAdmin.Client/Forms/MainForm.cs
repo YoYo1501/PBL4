@@ -1,10 +1,7 @@
 ﻿using System.Drawing.Drawing2D;
 using System.Globalization;
-using System.Net.NetworkInformation;
 using Microsoft.Extensions.DependencyInjection;
-using NetworkAdminTool.Interfaces;
-using NetworkAdmin.Shared.Models;
-using NetworkAdminTool.Services;
+using NetworkAdmin.Client.Presentation;
 
 namespace NetworkAdminTool.Forms
 {
@@ -14,7 +11,7 @@ namespace NetworkAdminTool.Forms
         private Point _dragStart;
         private bool _dragging;
 
-        public MainForm(IServiceProvider serviceProvider)
+        internal MainForm(IServiceProvider serviceProvider, DashboardPresenter presenter)
         {
             Text = "Network Administration Tool";
             StartPosition = FormStartPosition.CenterScreen;
@@ -27,7 +24,7 @@ namespace NetworkAdminTool.Forms
             ShowIcon = false;
             WindowState = FormWindowState.Maximized;
 
-            var dashboard = new DashboardCanvas(serviceProvider) { Dock = DockStyle.Fill };
+            var dashboard = new DashboardCanvas(serviceProvider, presenter) { Dock = DockStyle.Fill };
             dashboard.DragTitle += (_, e) =>
             {
                 if (e.Button == MouseButtons.Left)
@@ -67,15 +64,9 @@ namespace NetworkAdminTool.Forms
         private const int SidebarWidth = 280;
 
         private readonly IServiceProvider _services;
-        private readonly INetworkInfoService? _networkInfoService;
-        private readonly ISystemMonitorService? _monitorService;
-        private readonly NetworkDashboardState? _dashboardState;
-        private readonly Queue<float> _downloadMbpsHistory = new();
-        private readonly Queue<float> _uploadMbpsHistory = new();
+        private readonly DashboardPresenter _presenter;
         private readonly List<HitArea> _hits = new();
-        private long? _lastBytesReceived;
-        private long? _lastBytesSent;
-        private DateTime _lastTrafficSampleUtc = DateTime.MinValue;
+        private DashboardSnapshot _snapshot = DashboardSnapshot.Empty;
         private string? _hoverKey;
 
         public event MouseEventHandler? DragTitle;
@@ -85,12 +76,10 @@ namespace NetworkAdminTool.Forms
         public event EventHandler? Maximize;
         public event EventHandler? CloseApp;
 
-        public DashboardCanvas(IServiceProvider services)
+        public DashboardCanvas(IServiceProvider services, DashboardPresenter presenter)
         {
             _services = services;
-            _networkInfoService = services.GetService<INetworkInfoService>();
-            _monitorService = services.GetService<ISystemMonitorService>();
-            _dashboardState = services.GetService<NetworkDashboardState>();
+            _presenter = presenter;
             DoubleBuffered = true;
             ResizeRedraw = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
@@ -98,6 +87,7 @@ namespace NetworkAdminTool.Forms
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            _snapshot = _presenter.Refresh();
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
@@ -207,7 +197,7 @@ namespace NetworkAdminTool.Forms
                 DrawText(g, item.Item1, ir.X + 45, ir.Y + 12, 145, 23, 12.5f, i == 0 ? FontStyle.Bold : FontStyle.Regular, Color.White);
                 if (item.Item1 == "Alerts")
                 {
-                    var alertCount = _dashboardState?.GetUnreadAlertCount() ?? 0;
+                    var alertCount = _snapshot.UnreadAlertCount;
                     if (alertCount > 0)
                     {
                         var badgeText = alertCount > 99 ? "99+" : alertCount.ToString(CultureInfo.InvariantCulture);
@@ -254,8 +244,8 @@ namespace NetworkAdminTool.Forms
             var gap = 14;
             var cardW = Math.Max(178, (main.Width - 76 - gap * 4) / 5);
             var cardY = main.Y + 108;
-            var dashboardDevices = GetDashboardDevices();
-            var totalDevices = dashboardDevices.Length;
+            var dashboardDevices = _snapshot.Devices;
+            var totalDevices = dashboardDevices.Count;
             var onlineDevices = dashboardDevices.Count(device => device.Online);
             var offlineDevices = totalDevices - onlineDevices;
             var pingValues = dashboardDevices
@@ -299,7 +289,7 @@ namespace NetworkAdminTool.Forms
                 g.FillEllipse(dot, r.X + 17, r.Y + 49, 11, 11);
             DrawText(g, "Online", r.X + 35, r.Y + 45, 80, 24, 11f, FontStyle.Regular, C(42, 234, 104));
 
-            var adapter = _networkInfoService?.GetAvailableNetworkInterfaces().FirstOrDefault();
+            var adapter = _snapshot.PrimaryAdapter;
             var localIp = adapter?.IpAddress ?? string.Empty;
             var labels = new[] { "Adapter", "IP Address", "Gateway", "Subnet" };
             var values = new[]
@@ -307,7 +297,7 @@ namespace NetworkAdminTool.Forms
                 string.IsNullOrWhiteSpace(adapter?.Name) ? "-" : adapter!.Name,
                 string.IsNullOrWhiteSpace(localIp) ? "-" : localIp,
                 string.IsNullOrWhiteSpace(adapter?.Gateway) ? "-" : adapter!.Gateway,
-                string.IsNullOrWhiteSpace(localIp) ? "-" : _networkInfoService?.GetSubnetPrefix(localIp) ?? "-"
+                string.IsNullOrWhiteSpace(localIp) ? "-" : _snapshot.Subnet
             };
             var yy = r.Y + 82;
             for (var i = 0; i < labels.Length; i++)
@@ -349,11 +339,10 @@ namespace NetworkAdminTool.Forms
         private void DrawChart(Graphics g, Rectangle r)
         {
             Panel(g, r, "L\u01afU L\u01af\u1ee2NG M\u1ea0NG");
-            UpdateNetworkTrafficSample();
-            var download = _downloadMbpsHistory.ToArray();
-            var upload = _uploadMbpsHistory.ToArray();
-            var currentDownload = download.Length == 0 ? 0 : download[^1];
-            var currentUpload = upload.Length == 0 ? 0 : upload[^1];
+            var download = _snapshot.DownloadHistory;
+            var upload = _snapshot.UploadHistory;
+            var currentDownload = download.Count == 0 ? 0 : download[^1];
+            var currentUpload = upload.Count == 0 ? 0 : upload[^1];
 
             var pill = new Rectangle(r.Right - 118, r.Y + 17, 98, 32);
             using (var b = new SolidBrush(C(22, 38, 62)))
@@ -373,18 +362,17 @@ namespace NetworkAdminTool.Forms
         {
             Panel(g, r, "HI\u1ec6U SU\u1ea4T H\u1ec6 TH\u1ed0NG");
             var w = r.Width / 3;
-            var stats = _monitorService?.GetSystemStats();
-            var cpu = ClampPercent(stats?.CpuUsagePercent ?? 0);
-            var ram = ClampPercent(stats?.RamUsagePercent ?? 0);
-            var disk = ClampPercent((float)(_monitorService?.GetDiskUsage() ?? 0));
+            var cpu = ClampPercent(_snapshot.SystemStats.CpuUsagePercent);
+            var ram = ClampPercent(_snapshot.SystemStats.RamUsagePercent);
+            var disk = ClampPercent((float)_snapshot.DiskUsage);
             Ring(g, new Rectangle(r.X + 28, r.Y + 63, 130, 130), cpu, C(33, 176, 244), "CPU Usage", "Thời gian thực", "PerformanceCounter");
             Ring(g, new Rectangle(r.X + w + 36, r.Y + 63, 130, 130), ram, C(34, 206, 85), "RAM Usage", "Thời gian thực", "Physical memory");
             Ring(g, new Rectangle(r.X + w * 2 + 42, r.Y + 63, 130, 130), disk, C(135, 55, 244), "Disk Usage", "Ổ đĩa hệ thống", "Dự phòng: trung bình");
         }
 
-        private void DrawTable(Graphics g, Rectangle r, DashboardDevice[] rows)
+        private void DrawTable(Graphics g, Rectangle r, IReadOnlyList<DashboardDevice> rows)
         {
-            Panel(g, r, $"THI\u1ebeT B\u1eca TRONG M\u1ea0NG ({rows.Length})");
+            Panel(g, r, $"THI\u1ebeT B\u1eca TRONG M\u1ea0NG ({rows.Count})");
             var search = new Rectangle(r.Right - 400, r.Y + 17, 250, 32);
             using (var b = new SolidBrush(C(12, 29, 51)))
                 g.FillRound(b, search, 8);
@@ -407,7 +395,7 @@ namespace NetworkAdminTool.Forms
             for (var i = 0; i < head.Length; i++)
                 DrawText(g, head[i], r.X + col[i], y + 13, 120, 18, 10.5f, FontStyle.Regular, C(213, 222, 238));
 
-            if (rows.Length == 0)
+            if (rows.Count == 0)
             {
                 DrawText(g, "Chưa có kết quả quét. Bấm Quét lại để mở IP Scanner.", r.X + 28, y + 62, r.Width - 56, 26, 12f, FontStyle.Regular, C(183, 196, 217));
                 var viewDevicesEmpty = new Rectangle(r.X + 20, r.Bottom - 36, 205, 28);
@@ -432,9 +420,9 @@ namespace NetworkAdminTool.Forms
                 g.DrawLine(line, r.X + 20, y + 41, r.Right - 20, y + 41);
                 y += 39;
             }
-            if (rows.Length > maxVisibleRows)
+            if (rows.Count > maxVisibleRows)
             {
-                DrawText(g, $"+{rows.Length - maxVisibleRows} thiết bị khác", r.Right - 175, r.Bottom - 36, 145, 20, 10.5f, FontStyle.Regular, C(183, 196, 217), true);
+                DrawText(g, $"+{rows.Count - maxVisibleRows} thiết bị khác", r.Right - 175, r.Bottom - 36, 145, 20, 10.5f, FontStyle.Regular, C(183, 196, 217), true);
             }
             var viewDevices = new Rectangle(r.X + 20, r.Bottom - 36, 205, 28);
             DrawText(g, "Xem t\u1ea5t c\u1ea3 thi\u1ebft b\u1ecb ->", viewDevices.X, viewDevices.Y + 4, viewDevices.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-devices", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
@@ -447,7 +435,7 @@ namespace NetworkAdminTool.Forms
             var viewAlerts = new Rectangle(r.Right - 138, r.Y + 16, 116, 28);
             DrawText(g, "Xem t\u1ea5t c\u1ea3 ->", viewAlerts.X, viewAlerts.Y + 4, viewAlerts.Width, 20, 12f, string.Equals(_hoverKey, "dashboard-alerts", StringComparison.Ordinal) ? FontStyle.Bold : FontStyle.Regular, C(85, 132, 255));
             Hit(viewAlerts, () => _services.GetRequiredService<AlertsForm>().Show(), "dashboard-alerts");
-            var alerts = (_dashboardState?.GetRecentAlerts(4) ?? Array.Empty<NetworkAlert>()).ToList();
+            var alerts = _snapshot.RecentAlerts;
             if (alerts.Count == 0)
             {
                 DrawText(g, "Chưa có cảnh báo. Hãy chạy IP Scanner để cập nhật trạng thái gần nhất.", r.X + 24, r.Y + 76, r.Width - 48, 24, 11.5f, FontStyle.Regular, C(183, 196, 217));
@@ -527,63 +515,6 @@ namespace NetworkAdminTool.Forms
                 g.FillEllipse(dot, p.X - 4, p.Y - 4, 8, 8);
         }
 
-        private void UpdateNetworkTrafficSample()
-        {
-            var now = DateTime.UtcNow;
-            if (_lastTrafficSampleUtc != DateTime.MinValue && (now - _lastTrafficSampleUtc).TotalMilliseconds < 900)
-                return;
-
-            try
-            {
-                long bytesReceived = 0;
-                long bytesSent = 0;
-                foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
-                {
-                    if (networkInterface.OperationalStatus != OperationalStatus.Up ||
-                        networkInterface.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
-                    {
-                        continue;
-                    }
-
-                    var stats = networkInterface.GetIPv4Statistics();
-                    bytesReceived += stats.BytesReceived;
-                    bytesSent += stats.BytesSent;
-                }
-
-                if (_lastBytesReceived.HasValue && _lastBytesSent.HasValue)
-                {
-                    var seconds = Math.Max(0.001, (now - _lastTrafficSampleUtc).TotalSeconds);
-                    var downloadMbps = (float)Math.Max(0, (bytesReceived - _lastBytesReceived.Value) * 8d / seconds / 1_000_000d);
-                    var uploadMbps = (float)Math.Max(0, (bytesSent - _lastBytesSent.Value) * 8d / seconds / 1_000_000d);
-                    EnqueueTrafficSample(downloadMbps, uploadMbps);
-                }
-                else
-                {
-                    EnqueueTrafficSample(0, 0);
-                }
-
-                _lastBytesReceived = bytesReceived;
-                _lastBytesSent = bytesSent;
-                _lastTrafficSampleUtc = now;
-            }
-            catch
-            {
-                EnqueueTrafficSample(0, 0);
-                _lastTrafficSampleUtc = now;
-            }
-        }
-
-        private void EnqueueTrafficSample(float downloadMbps, float uploadMbps)
-        {
-            _downloadMbpsHistory.Enqueue(downloadMbps);
-            _uploadMbpsHistory.Enqueue(uploadMbps);
-
-            while (_downloadMbpsHistory.Count > 60)
-                _downloadMbpsHistory.Dequeue();
-            while (_uploadMbpsHistory.Count > 60)
-                _uploadMbpsHistory.Dequeue();
-        }
-
         private void Ring(Graphics g, Rectangle r, int value, Color color, string title, string sub1, string sub2)
         {
             using var track = new Pen(C(35, 52, 80), 10f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
@@ -621,33 +552,6 @@ namespace NetworkAdminTool.Forms
             using var pen = new Pen(color, 4f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
             g.DrawLine(pen, x, y + 8, x + 20, y + 8);
             DrawText(g, text, x + 30, y - 1, 140, 20, 9.5f, FontStyle.Regular, Color.White);
-        }
-
-        private DashboardDevice[] GetDashboardDevices()
-        {
-            if (_dashboardState?.HasScan == true)
-            {
-                return _dashboardState.GetLatestDevices()
-                    .Select(device => new DashboardDevice(
-                        GuessDeviceIcon(device),
-                        device.IpAddress,
-                        "-",
-                        string.IsNullOrWhiteSpace(device.MacAddress) ? "-" : device.MacAddress,
-                        device.IsOnline,
-                        device.ResponseTimeMs,
-                        device.LastSeen?.ToString("HH:mm:ss") ?? "-"))
-                    .ToArray();
-            }
-
-            return Array.Empty<DashboardDevice>();
-        }
-
-        private static string GuessDeviceIcon(NetworkDevice device)
-        {
-            if (device.IpAddress.EndsWith(".1", StringComparison.Ordinal))
-                return "router";
-
-            return "pc";
         }
 
         private static string PercentText(int value, int total)
@@ -710,7 +614,6 @@ namespace NetworkAdminTool.Forms
 
         private readonly record struct Stat(string Title, string Value, string Subtitle, Color Accent, string Icon);
         private readonly record struct HitArea(Rectangle Bounds, Action? Action, string Key);
-        private readonly record struct DashboardDevice(string Icon, string IpAddress, string Hostname, string MacAddress, bool Online, long? PingMs, string LastSeen);
 
         private static void DrawLogo(Graphics g, Rectangle r)
         {

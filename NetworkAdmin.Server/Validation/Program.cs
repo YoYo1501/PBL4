@@ -35,13 +35,13 @@ Check(snapshot.Interfaces.Count == 4, "All adapters remain available in details"
 Check((snapshot with { Interfaces = snapshot.Interfaces.Take(2).ToArray() }).PrimaryInterface is null, "Virtual-only snapshots do not invent a physical primary NIC");
 var history = new TelemetryHistory();
 for (var i = 0; i < 65; i++) history.Observe([snapshot with { LastTelemetryAt = now.AddSeconds(i), Cpu = i }]);
-Check(history.For("history-A").Count == 60 && history.For("history-A")[0].Cpu == 5, "Chart retains the last 60 samples");
+Check(history.For("id-A").Count == 60 && history.For("id-A")[0].Cpu == 5, "Chart retains the last 60 samples");
 history.Observe([snapshot with { LastTelemetryAt = now.AddSeconds(64), Cpu = 64, Connected = false }]);
-Check(history.For("history-A").Count == 60, "Polling and disconnect do not fabricate chart samples");
-history.Observe([snapshot with { LastTelemetryAt = now.AddSeconds(64), Cpu = 64 }, snapshot with { SessionId = "history-B", Cpu = 91 }]);
-Check(history.For("history-A").Last().Cpu == 64 && history.For("history-B").Single().Cpu == 91, "Client chart histories stay separate");
-history.Observe([snapshot with { SessionId = "history-B", Cpu = 91 }]);
-Check(history.For("history-A").Count == 0, "Evicted session chart data is released");
+Check(history.For("id-A").Count == 60, "Polling and disconnect do not fabricate chart samples");
+history.Observe([snapshot with { LastTelemetryAt = now.AddSeconds(64), Cpu = 64 }, snapshot with { ClientId = "history-B", SessionId = "session-B", Cpu = 91 }]);
+Check(history.For("id-A").Last().Cpu == 64 && history.For("history-B").Single().Cpu == 91, "Client chart histories stay separate");
+history.Observe([snapshot with { ClientId = "history-B", SessionId = "session-B", Cpu = 91 }]);
+Check(history.For("id-A").Count == 0, "Evicted session chart data is released");
 var ping = await new PingService().PingSeriesAsync("127.0.0.1");
 Check(ping.Sent == 4 && ping.Attempts.Count == 4 && ping.Received == 4 && ping.Lost == 0 && ping.AverageResponseTimeMs.HasValue, "Actual ICMP: four loopback probes and statistics");
 using (var canceled = new CancellationTokenSource())
