@@ -8,9 +8,9 @@ namespace NetworkAdmin.Server;
 internal sealed class ServerDashboardForm : Form
 {
     private readonly ServerRuntime _runtime;
+    private readonly ServerDashboardPresenter _presenter;
     private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 500 };
     private readonly CancellationTokenSource _lifetime = new();
-    private readonly TelemetryHistory _history = new();
     private readonly HashSet<string> _knownAgents = new(StringComparer.OrdinalIgnoreCase);
     private readonly ComboBox _selector = new()
     {
@@ -75,14 +75,8 @@ internal sealed class ServerDashboardForm : Form
     private readonly DataGridView _interfaces = DashboardTheme.Grid(("Name", "Interface", 110), ("IpAddress", "IPv4", 105),
         ("MacAddress", "MAC", 130), ("Gateway", "Gateway", 105), ("Subnet", "Subnet", 110), ("Description", "Description", 180));
     private IReadOnlyList<ClientSnapshot> _snapshots = [];
-    private readonly Dictionary<string, SessionCommandState> _commands = new(StringComparer.OrdinalIgnoreCase);
-    private readonly SessionCommandState _emptyCommands = new();
-    private SessionCommandState CommandsFor(string? id)
-    {
-        if (id is null) return _emptyCommands;
-        if (!_commands.TryGetValue(id, out var state)) _commands[id] = state = new();
-        return state;
-    }
+    // Retained as a view of presenter state for existing layout validation and diagnostics.
+    private readonly Dictionary<string, SessionCommandState> _commands;
     private DateTime? _runningSince;
     private TimeSpan _uptimeValue;
     private string? _selectedId;
@@ -106,6 +100,8 @@ internal sealed class ServerDashboardForm : Form
         // Scaling an empty form first leaves subsequently added pixel-sized rows unscaled.
         SuspendLayout();
         _runtime = runtime;
+        _presenter = new ServerDashboardPresenter(runtime);
+        _commands = _presenter.Commands;
         Text = "Network Administration | Server";
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 9);
@@ -364,7 +360,7 @@ internal sealed class ServerDashboardForm : Form
     {
         if (_closing) return;
         _snapshots = _runtime.GetClients();
-        _history.Observe(_snapshots);
+        _presenter.ObserveClients(_snapshots);
         foreach (var c in _snapshots) _knownAgents.Add(c.ClientId);
         if (_runtime.IsRunning)
         {
@@ -392,22 +388,6 @@ internal sealed class ServerDashboardForm : Form
         try
         {
             if (_selectedId is null) _selectedId = _snapshots.FirstOrDefault(c => c.Connected)?.ClientId;
-            foreach (var c in _snapshots)
-            {
-                var state = CommandsFor(c.ClientId);
-                if (state.SessionId is not null && state.SessionId != c.SessionId)
-                {
-                    if (state.PingPending) state.PingStatus = "Previous session Ping interrupted after reconnect.";
-                    if (state.ScanPending) state.ScanStatus = "Previous session scan interrupted after reconnect.";
-                    if (state.PowerPending) state.PowerStatus = "Previous session power command interrupted after reconnect.";
-                    if (state.LockPending) state.LockStatus = "Previous session lock command interrupted after reconnect.";
-                    state.PingPending = false;
-                    state.ScanPending = false;
-                    state.PowerPending = false;
-                    state.LockPending = false;
-                }
-                state.SessionId = c.SessionId;
-            }
             var key = string.Join(";", _snapshots.Select(c => c.ToString()));
             if (key != _selectorKey)
             {
@@ -415,7 +395,6 @@ internal sealed class ServerDashboardForm : Form
                 _selector.SelectedItem = _selector.Items.Cast<ClientSnapshot>().FirstOrDefault(c => string.Equals(c.ClientId, _selectedId, StringComparison.OrdinalIgnoreCase));
             }
             var ids = _snapshots.Select(c => c.ClientId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var id in _commands.Keys.Where(id => !ids.Contains(id)).ToArray()) _commands.Remove(id);
             foreach (var row in _clients.Rows.Cast<DataGridViewRow>().Where(r => !ids.Contains((string)r.Tag!)).ToArray()) _clients.Rows.Remove(row);
             foreach (var c in _snapshots)
             {
@@ -435,9 +414,9 @@ internal sealed class ServerDashboardForm : Form
     private void RenderSelection()
     {
         var c = Selected;
-        var state = CommandsFor(c?.ClientId);
+        var state = _presenter.CommandsFor(c?.ClientId);
         _dashboardClient.UpdateClient(c); _clientsDetail.UpdateClient(c);
-        var samples = _history.For(c?.ClientId);
+        var samples = _presenter.TelemetryFor(c?.ClientId);
         _dashboardTelemetry.UpdateClient(c, samples); _monitoringTelemetry.UpdateClient(c, samples);
         var enabled = c?.Connected == true && _runtime.IsRunning && !_closing;
         _dashboardPing.SetBusy(enabled && !state.PingPending, state.PingPending); _pingPage.SetBusy(enabled && !state.PingPending, state.PingPending);
@@ -497,7 +476,7 @@ internal sealed class ServerDashboardForm : Form
     }
     private void RenderScan()
     {
-        var state = CommandsFor(Selected?.ClientId);
+        var state = _presenter.CommandsFor(Selected?.ClientId);
         var rows = state.Scan is null ? Array.Empty<ScanHostSnapshot>() : ServerRuntime.MatchScan(state.Scan, _snapshots);
         var summary = state.ScanStatus;
         if (state.Scan is not null && !state.ScanError)
@@ -510,13 +489,9 @@ internal sealed class ServerDashboardForm : Form
     }
     private async Task PingAsync()
     {
-        var c = Selected;
-        if (c?.Connected != true) return;
-        var state = CommandsFor(c.ClientId);
-        if (state.PingPending) return;
-        var sessionId = c.SessionId;
+        var client = Selected;
+        if (client?.Connected != true) return;
         var target = _pingPage.TargetInput.Text.Trim();
-        var origin = $"Agent: {c.Hostname} ({c.IpAddress}) / Session {c.SessionId[..Math.Min(8, c.SessionId.Length)]}";
         if (string.IsNullOrWhiteSpace(target))
         {
             PingStatus("Please enter an IP address or hostname before pinging.", true);
@@ -524,96 +499,28 @@ internal sealed class ServerDashboardForm : Form
             return;
         }
 
-        state.PingPending = true;
-        state.PingError = false;
-        state.PingStatus = $"Pinging {target}...\n{origin}";
-        RenderSelection();
-        try
-        {
-            var result = await _runtime.PingAsync(sessionId, target, _lifetime.Token);
-            if (_closing || !IsCurrentSession(c.ClientId, sessionId, state)) return;
-            state.Ping = result; state.PingError = !result.Success;
-            state.PingStatus = $"{result.StatusMessage} | Target: {result.Host} | {DateTime.Now:T}\n{origin}";
-        }
-        catch (Exception ex)
-        {
-            if (!_closing && IsCurrentSession(c.ClientId, sessionId, state))
-            { state.PingStatus = $"Ping failed: {ex.Message}\n{origin}"; state.PingError = true; }
-        }
-        finally
-        {
-            if (state.SessionId == sessionId) state.PingPending = false;
-            if (!_closing) RefreshState();
-        }
+        await _presenter.PingAsync(client, target, _lifetime.Token, () => _closing, RenderSelection, RefreshState);
     }
     private async Task ScanAsync()
     {
-        var c = Selected;
-        if (c?.Connected != true) return;
-        var state = CommandsFor(c.ClientId);
-        if (state.ScanPending) return;
-        var sessionId = c.SessionId;
-        state.ScanPending = true; state.ScanError = false;
+        var client = Selected;
+        if (client?.Connected != true) return;
         var subnet = _scanner.SubnetInput.Text;
-        var origin = $"Agent: {c.Hostname} / Session {c.SessionId[..Math.Min(8, c.SessionId.Length)]} | Subnet: {subnet}";
-        state.ScanStatus = $"Scanning...\n{origin}"; RenderSelection();
-        try
-        {
-            var result = await _runtime.ScanAsync(sessionId, subnet, _lifetime.Token, (int)_scanner.TimeoutInput.Value);
-            if (_closing || !IsCurrentSession(c.ClientId, sessionId, state)) return;
-            if (!result.Success) throw new InvalidOperationException(result.ErrorMessage);
-            state.Scan = result; state.ScanAt = DateTime.Now; state.ScanOrigin = origin;
-        }
-        catch (Exception ex)
-        {
-            if (!_closing && IsCurrentSession(c.ClientId, sessionId, state))
-            { state.ScanError = true; state.ScanStatus = $"Scan failed: {ex.Message}\n{origin}"; }
-        }
-        finally
-        {
-            if (state.SessionId == sessionId) state.ScanPending = false;
-            if (!_closing) RefreshState();
-        }
+        await _presenter.ScanAsync(client, subnet, (int)_scanner.TimeoutInput.Value,
+            _lifetime.Token, () => _closing, RenderSelection, RefreshState);
     }
     private async Task GetAgentInfoAsync()
     {
-        var c = Selected;
-        if (c?.Connected != true) return;
-        var state = CommandsFor(c.ClientId);
-        if (state.RemoteInfoPending) return;
-        var sessionId = c.SessionId;
-        state.RemoteInfoPending = true;
-        state.RemoteInfoError = false;
-        state.RemoteInfoStatus = $"Requesting information from {c.Hostname}...";
-        RenderSelection();
-        try
-        {
-            var result = await _runtime.GetAgentInfoAsync(c.ClientId, _lifetime.Token);
-            if (_closing || !IsCurrentSession(c.ClientId, sessionId, state)) return;
-            state.RemoteInfoError = result.Status is not NetworkAdmin.Shared.Messages.RemoteAdministrationCommandStatus.Completed;
-            state.RemoteInfoStatus = result.Status == NetworkAdmin.Shared.Messages.RemoteAdministrationCommandStatus.Completed
-                ? result.Result
-                : $"{result.Status}: {result.ErrorMessage}";
-        }
-        catch (Exception ex)
-        {
-            if (!_closing && IsCurrentSession(c.ClientId, sessionId, state))
-            {
-                state.RemoteInfoError = true;
-                state.RemoteInfoStatus = $"Remote command failed: {ex.Message}";
-            }
-        }
-        finally
-        {
-            if (state.SessionId == sessionId) state.RemoteInfoPending = false;
-            if (!_closing) RefreshState();
-        }
+        var client = Selected;
+        if (client?.Connected != true) return;
+        await _presenter.GetAgentInfoAsync(client, _lifetime.Token, () => _closing,
+            RenderSelection, RefreshState);
     }
     private async Task PowerAsync(RemoteAdministrationCommandType command)
     {
         var client = Selected;
         if (client?.Connected != true) return;
-        var state = CommandsFor(client.ClientId);
+        var state = _presenter.CommandsFor(client.ClientId);
         if (state.PowerPending) return;
 
         var action = command == RemoteAdministrationCommandType.Restart ? "restart" : "shut down";
@@ -625,38 +532,16 @@ internal sealed class ServerDashboardForm : Form
             MessageBoxDefaultButton.Button2);
         if (confirmation != DialogResult.Yes) return;
 
-        var sessionId = client.SessionId;
-        state.PowerPending = true;
-        state.PowerError = false;
-        state.PowerStatus = $"Sending {action} command to {client.Hostname}...";
-        RenderSelection();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _powerCancellation = cancellation;
         try
         {
-            var result = await _runtime.PowerClientAsync(
-                client.ClientId,
-                command,
-                countdown,
-                cancellation.Token,
-                progress: update => UpdatePowerProgress(client.ClientId, sessionId, state, update));
-            if (_closing || !IsCurrentSession(client.ClientId, sessionId, state)) return;
-            state.PowerError = result.Status != RemoteAdministrationCommandStatus.Completed;
-            state.PowerStatus = FormatPowerResult(action, result);
-        }
-        catch (Exception ex)
-        {
-            if (!_closing && IsCurrentSession(client.ClientId, sessionId, state))
-            {
-                state.PowerError = true;
-                state.PowerStatus = $"{action} command failed: {ex.Message}";
-            }
+            await _presenter.PowerAsync(client, command, countdown, cancellation.Token, () => _closing,
+                RenderSelection, RefreshState, UpdatePowerProgress);
         }
         finally
         {
             if (ReferenceEquals(_powerCancellation, cancellation)) _powerCancellation = null;
-            if (state.SessionId == sessionId) state.PowerPending = false;
-            if (!_closing) RefreshState();
         }
     }
 
@@ -668,7 +553,7 @@ internal sealed class ServerDashboardForm : Form
         {
             BeginInvoke(new Action(() =>
             {
-                if (_closing || !IsCurrentSession(clientId, sessionId, state)) return;
+                if (_closing || !_presenter.IsCurrentSession(clientId, sessionId, state)) return;
                 state.PowerError = result.Status is RemoteAdministrationCommandStatus.Rejected
                     or RemoteAdministrationCommandStatus.Failed or RemoteAdministrationCommandStatus.Timeout;
                 state.PowerStatus = result.Status switch
@@ -677,7 +562,7 @@ internal sealed class ServerDashboardForm : Form
                         => "Command sent to client; waiting for acceptance...",
                     RemoteAdministrationCommandStatus.Accepted => "Client accepted the command; waiting to prepare...",
                     RemoteAdministrationCommandStatus.Preparing => "Client accepted the command and is preparing Windows power action...",
-                    _ => FormatPowerResult("power", result)
+                    _ => ServerDashboardPresenter.FormatPowerResult("power", result)
                 };
                 RenderSelection();
             }));
@@ -685,16 +570,11 @@ internal sealed class ServerDashboardForm : Form
         catch (InvalidOperationException) { }
     }
 
-    private static string FormatPowerResult(string action, RemoteAdministrationResultMessage result) =>
-        result.Status == RemoteAdministrationCommandStatus.Completed
-            ? result.Result
-            : $"{action} command {result.Status}: {result.ErrorMessage}";
-
     private async Task LockAsync(bool lockClient)
     {
         var client = Selected;
         if (client?.Connected != true) return;
-        var state = CommandsFor(client.ClientId);
+        var state = _presenter.CommandsFor(client.ClientId);
         if (state.LockPending) return;
 
         var managed = _lockMode.SelectedIndex == 1;
@@ -723,13 +603,13 @@ internal sealed class ServerDashboardForm : Form
                 command,
                 cancellation.Token,
                 progress: update => UpdateLockProgress(client.ClientId, sessionId, state, update));
-            if (_closing || !IsCurrentSession(client.ClientId, sessionId, state)) return;
+            if (_closing || !_presenter.IsCurrentSession(client.ClientId, sessionId, state)) return;
             state.LockError = result.Status != RemoteAdministrationCommandStatus.Completed;
             state.LockStatus = FormatLockResult(result);
         }
         catch (Exception ex)
         {
-            if (!_closing && IsCurrentSession(client.ClientId, sessionId, state))
+            if (!_closing && _presenter.IsCurrentSession(client.ClientId, sessionId, state))
             {
                 state.LockError = true;
                 state.LockStatus = $"{mode} {action} failed: {ex.Message}";
@@ -751,7 +631,7 @@ internal sealed class ServerDashboardForm : Form
         {
             BeginInvoke(new Action(() =>
             {
-                if (_closing || !IsCurrentSession(clientId, sessionId, state)) return;
+                if (_closing || !_presenter.IsCurrentSession(clientId, sessionId, state)) return;
                 state.LockError = result.Status is RemoteAdministrationCommandStatus.Rejected
                     or RemoteAdministrationCommandStatus.Failed or RemoteAdministrationCommandStatus.Timeout;
                 state.LockStatus = result.Status switch
@@ -773,9 +653,6 @@ internal sealed class ServerDashboardForm : Form
             ? result.Result
             : $"Lock command {result.Status}: {result.ErrorMessage}";
 
-    private bool IsCurrentSession(string clientId, string sessionId, SessionCommandState state) =>
-        state.SessionId == sessionId && _runtime.GetClients().Any(c =>
-            string.Equals(c.ClientId, clientId, StringComparison.OrdinalIgnoreCase) && c.SessionId == sessionId && c.Connected);
     private async void CloseAsync(object? sender, FormClosingEventArgs e)
     {
         if (_closed) return;

@@ -1,19 +1,15 @@
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
-using System.Net;
-using NetworkAdminTool.Interfaces;
+using NetworkAdmin.Client.Presentation;
 using NetworkAdmin.Shared.Models;
-using NetworkAdminTool.Services;
+using NetworkAdminTool.Models;
 
 namespace NetworkAdminTool.Forms
 {
     public class ScannerForm : Form
     {
-        private readonly INetworkScannerService _scannerService;
-        private readonly INetworkInfoService _networkInfoService;
-        private readonly ILoggerService _logger;
-        private readonly NetworkDashboardState _dashboardState;
+        private readonly ScannerPresenter _presenter;
 
         private readonly ComboBox _cboSubnet;
         private readonly ComboBox _cboInterfaces;
@@ -37,10 +33,7 @@ namespace NetworkAdminTool.Forms
 
         private CancellationTokenSource? _scanCts;
         private bool _isScanning;
-        private List<NetworkDeviceRow> _allRows = new();
-        private int _totalHosts;
         private DateTime _lastProgressUiUpdateUtc = DateTime.MinValue;
-        private DeviceFilter _deviceFilter = DeviceFilter.All;
 
         private static readonly Color PageBack = Color.FromArgb(244, 248, 253);
         private static readonly Color PanelBack = Color.White;
@@ -56,12 +49,9 @@ namespace NetworkAdminTool.Forms
         private static Font UiFont(float pixels, FontStyle style = FontStyle.Regular, string family = "Segoe UI") =>
             new(family, pixels, style, GraphicsUnit.Pixel);
 
-        public ScannerForm(INetworkScannerService scannerService, INetworkInfoService networkInfoService, ILoggerService logger, NetworkDashboardState dashboardState)
+        internal ScannerForm(ScannerPresenter presenter)
         {
-            _scannerService = scannerService;
-            _networkInfoService = networkInfoService;
-            _logger = logger;
-            _dashboardState = dashboardState;
+            _presenter = presenter;
 
             Text = "IP Scanner";
             StartPosition = FormStartPosition.CenterParent;
@@ -306,9 +296,9 @@ namespace NetworkAdminTool.Forms
             var scannedCard = BuildStatCard("Đã quét", "địa chỉ", _lblScannedValue, Blue, "screen");
             var onlineCard = BuildStatCard("Online", "thiết bị", _lblOnlineValue, Green, "dot");
             var offlineCard = BuildStatCard("Offline", "đã từng kết nối", _lblOfflineValue, Red, "wifi");
-            MakeFilterCard(scannedCard, DeviceFilter.All);
-            MakeFilterCard(onlineCard, DeviceFilter.Online);
-            MakeFilterCard(offlineCard, DeviceFilter.Offline);
+            MakeFilterCard(scannedCard, ScannerDeviceFilter.All);
+            MakeFilterCard(onlineCard, ScannerDeviceFilter.Online);
+            MakeFilterCard(offlineCard, ScannerDeviceFilter.Offline);
 
             cardsPanel.Controls.Add(scannedCard, 0, 0);
             cardsPanel.Controls.Add(onlineCard, 1, 0);
@@ -317,12 +307,12 @@ namespace NetworkAdminTool.Forms
             return cardsPanel;
         }
 
-        private void MakeFilterCard(Control control, DeviceFilter filter)
+        private void MakeFilterCard(Control control, ScannerDeviceFilter filter)
         {
             control.Cursor = Cursors.Hand;
             control.Click += (_, _) =>
             {
-                _deviceFilter = filter;
+                _presenter.SetFilter(filter);
                 ApplyFilter();
             };
 
@@ -668,7 +658,7 @@ namespace NetworkAdminTool.Forms
 
         private void LoadAvailableInterfaces()
         {
-            var interfaces = _networkInfoService.GetAvailableNetworkInterfaces();
+            var interfaces = _presenter.GetAvailableInterfaces();
             _cboInterfaces.Items.Clear();
 
             foreach (var item in interfaces)
@@ -693,16 +683,16 @@ namespace NetworkAdminTool.Forms
             if (_cboInterfaces.SelectedItem is not NetworkInterfaceInfo selected)
                 return;
 
-            var cidr = _networkInfoService.GetSubnetPrefix(selected.IpAddress);
-            if (!string.IsNullOrWhiteSpace(cidr) && !_cboSubnet.Items.Contains(ToRangeText(cidr)))
-                _cboSubnet.Items.Insert(0, ToRangeText(cidr));
+            var details = _presenter.GetInterfaceDetails(selected);
+            if (!string.IsNullOrWhiteSpace(details.SubnetRange) && !_cboSubnet.Items.Contains(details.SubnetRange))
+                _cboSubnet.Items.Insert(0, details.SubnetRange);
 
-            _cboSubnet.Text = ToRangeText(cidr);
-            _lblAdapterValue.Text = selected.Description;
-            _lblIpValue.Text = selected.IpAddress;
-            _lblGatewayValue.Text = string.IsNullOrWhiteSpace(selected.Gateway) ? "-" : selected.Gateway;
-            _lblMaskValue.Text = TryGetMaskFromCidr(cidr, out var mask) ? mask : "-";
-            _lblMacValue.Text = TryGetLocalMac(selected.Name, out var mac) ? mac : "-";
+            _cboSubnet.Text = details.SubnetRange;
+            _lblAdapterValue.Text = details.AdapterDescription;
+            _lblIpValue.Text = details.IpAddress;
+            _lblGatewayValue.Text = details.Gateway;
+            _lblMaskValue.Text = details.SubnetMask;
+            _lblMacValue.Text = details.MacAddress;
         }
 
         private async void BtnStartScan_Click(object? sender, EventArgs e)
@@ -713,27 +703,26 @@ namespace NetworkAdminTool.Forms
                 return;
             }
 
-            var subnet = ToCidrText(_cboSubnet.Text.Trim());
-            if (!TryValidateScanSubnet(subnet, out var validationMessage))
+            var subnet = _presenter.ToCidrText(_cboSubnet.Text.Trim());
+            if (!_presenter.TryValidateScanSubnet(subnet, out var validationMessage))
             {
-                MessageBox.Show(validationMessage, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(validationMessage, "Th\u00f4ng b\u00e1o", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             _scanCts = new CancellationTokenSource();
             _isScanning = true;
-            _allRows = new List<NetworkDeviceRow>();
-            _totalHosts = CountHosts(subnet);
+            _presenter.BeginScan(subnet);
             _lastProgressUiUpdateUtc = DateTime.MinValue;
-            SetScanProgress(0, _totalHosts, 0, string.Empty);
-            _btnStartScan.Text = "Dừng";
+            SetScanProgress(0, _presenter.TotalHosts, 0, string.Empty);
+            _btnStartScan.Text = "D\u1eebng";
             _scanStopwatch.Restart();
             _scanTimer.Start();
             _lblDurationValue.Text = "00:00:00";
-            _lblResultTitle.Text = "Kết quả quét (đang quét...)";
+            _lblResultTitle.Text = "K\u1ebft qu\u1ea3 qu\u00e9t (\u0111ang qu\u00e9t...)";
 
             var selectedInterface = _cboInterfaces.SelectedItem as NetworkInterfaceInfo;
-            var progress = new Progress<NetworkAdminTool.Models.NetworkScanProgress>(p =>
+            var progress = new Progress<NetworkScanProgress>(p =>
             {
                 var now = DateTime.UtcNow;
                 if (p.ScannedHosts < p.TotalHosts && (now - _lastProgressUiUpdateUtc).TotalMilliseconds < 150)
@@ -743,114 +732,64 @@ namespace NetworkAdminTool.Forms
                 SetScanProgress(p.ScannedHosts, p.TotalHosts, p.OnlineHosts, p.CurrentIpAddress);
                 _lblScannedValue.Text = p.ScannedHosts.ToString();
                 _lblOnlineValue.Text = p.OnlineHosts.ToString();
-                _lblOfflineValue.Text = _dashboardState.GetLatestDevices().Count(device => !device.IsOnline).ToString();
+                _lblOfflineValue.Text = _presenter.KnownOfflineCount.ToString();
             });
 
             try
             {
-                var devices = await _scannerService.ScanNetworkAsync(
-                    subnet,
-                    800,
-                    interfaceName: selectedInterface?.Name,
-                    cancellationToken: _scanCts.Token,
-                    progress: progress);
-
-                var scanAt = DateTime.Now;
-                _dashboardState.UpdateScanResult(subnet, devices, scanAt);
-                _allRows = _dashboardState.GetLatestDevices()
-                    .Select(device => CreateDeviceRow(device, scanAt))
-                    .OrderBy(row => GetIpValue(row.IpAddress))
-                    .ToList();
-
+                await _presenter.ScanAsync(subnet, selectedInterface?.Name, _scanCts.Token, progress);
                 ApplyFilter();
                 UpdateStats();
-                SetScanProgress(_totalHosts, _totalHosts, _allRows.Count(row => row.StatusText == "Online"), string.Empty);
-                _logger.Log($"IP scanner completed: {subnet}, online={_allRows.Count(row => row.StatusText == "Online")}, known={_allRows.Count}");
+                SetScanProgress(_presenter.TotalHosts, _presenter.TotalHosts, _presenter.OnlineCount, string.Empty);
             }
             catch (OperationCanceledException)
             {
-                _logger.Log($"IP scanner cancelled: {subnet}");
-                _lblResultTitle.Text = $"Kết quả quét (đã dừng, {_allRows.Count} thiết bị online)";
+                _presenter.LogCancelled(subnet);
+                _lblResultTitle.Text = $"K\u1ebft qu\u1ea3 qu\u00e9t (\u0111\u00e3 d\u1eebng, {_presenter.OnlineCount} thi\u1ebft b\u1ecb online)";
             }
             catch (Exception ex)
             {
-                _logger.Log($"IP scanner failed: {ex.Message}");
-                MessageBox.Show($"Quét mạng thất bại: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _presenter.LogFailure(ex.Message);
+                MessageBox.Show($"Qu\u00e9t m\u1ea1ng th\u1ea5t b\u1ea1i: {ex.Message}", "L\u1ed7i", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
                 _scanStopwatch.Stop();
                 _scanTimer.Stop();
                 _lblDurationValue.Text = _scanStopwatch.Elapsed.ToString(@"hh\:mm\:ss");
-                _btnStartScan.Text = "Quét";
+                _btnStartScan.Text = "Qu\u00e9t";
                 _scanCts?.Dispose();
                 _scanCts = null;
                 _isScanning = false;
                 _lblProgressStatus.Text = _scanProgress.Value >= _scanProgress.Maximum
-                    ? $"Hoàn tất: {_allRows.Count(row => row.StatusText == "Online")} online, {_allRows.Count(row => row.StatusText == "Offline")} offline trong {_scanStopwatch.Elapsed:mm\\:ss}"
-                    : "Sẵn sàng quét";
+                    ? $"Ho\u00e0n t\u1ea5t: {_presenter.OnlineCount} online, {_presenter.OfflineCount} offline trong {_scanStopwatch.Elapsed:mm\\:ss}"
+                    : "S\u1eb5n s\u00e0ng qu\u00e9t";
             }
         }
 
         private void ApplyFilter()
         {
-            var keyword = _txtSearch.Text.Trim();
-            var rows = _allRows.AsEnumerable();
-
-            rows = _deviceFilter switch
-            {
-                DeviceFilter.Online => rows.Where(row => row.StatusText == "Online"),
-                DeviceFilter.Offline => rows.Where(row => row.StatusText == "Offline"),
-                _ => rows
-            };
-
-            if (!string.IsNullOrWhiteSpace(keyword))
-            {
-                rows = rows.Where(row =>
-                    row.IpAddress.Contains(keyword, StringComparison.OrdinalIgnoreCase)
-                    || row.Hostname.Contains(keyword, StringComparison.OrdinalIgnoreCase)
-                    || row.MacAddress.Contains(keyword, StringComparison.OrdinalIgnoreCase)
-                    || row.Vendor.Contains(keyword, StringComparison.OrdinalIgnoreCase));
-            }
-
-            var filteredRows = rows.ToList();
-
-            _gridResults.DataSource = filteredRows;
-            var suffix = _deviceFilter switch
-            {
-                DeviceFilter.Online => "online",
-                DeviceFilter.Offline => "offline đã từng kết nối",
-                _ => "thiết bị"
-            };
-            _lblResultTitle.Text = $"Kết quả quét ({filteredRows.Count} {suffix}, {_allRows.Count(row => row.StatusText == "Online")} online)";
+            var result = _presenter.FilterRows(_txtSearch.Text);
+            _gridResults.DataSource = result.Rows.ToList();
+            _lblResultTitle.Text = result.Title;
         }
 
         private void UpdateStats()
         {
-            var online = _allRows.Count(row => row.StatusText == "Online");
-            var offline = _allRows.Count(row => row.StatusText == "Offline");
-            var scanned = _totalHosts > 0 ? _totalHosts : _allRows.Count;
-
-            _lblScannedValue.Text = scanned.ToString();
-            _lblOnlineValue.Text = online.ToString();
-            _lblOfflineValue.Text = offline.ToString();
+            _lblScannedValue.Text = _presenter.ScannedCount.ToString();
+            _lblOnlineValue.Text = _presenter.OnlineCount.ToString();
+            _lblOfflineValue.Text = _presenter.OfflineCount.ToString();
         }
 
         private bool LoadLastScanState()
         {
-            if (!_dashboardState.HasScan)
+            if (!_presenter.LoadLastScanState())
                 return false;
-
-            _totalHosts = string.IsNullOrWhiteSpace(_dashboardState.LastSubnet) ? 0 : CountHosts(_dashboardState.LastSubnet);
-            _allRows = _dashboardState.GetLatestDevices()
-                .Select(device => CreateDeviceRow(device, _dashboardState.LastScanAt ?? DateTime.Now))
-                .OrderBy(row => GetIpValue(row.IpAddress))
-                .ToList();
 
             ApplyFilter();
             UpdateStats();
             _lblDurationValue.Text = "00:00:00";
-            _lblProgressStatus.Text = $"Kết quả gần nhất: {_dashboardState.LastScanAt:HH:mm:ss}";
+            _lblProgressStatus.Text = $"K\u1ebft qu\u1ea3 g\u1ea7n nh\u1ea5t: {_presenter.LastScanAt:HH:mm:ss}";
             return true;
         }
 
@@ -872,166 +811,6 @@ namespace NetworkAdminTool.Forms
             _lblProgressStatus.Text = _isScanning
                 ? $"Đang quét {scanned}/{total} địa chỉ - online: {online}{(string.IsNullOrWhiteSpace(currentIp) ? string.Empty : $" - {currentIp}")}"
                 : "Sẵn sàng quét";
-        }
-
-        private static bool TryGetMaskFromCidr(string cidr, out string subnetMask)
-        {
-            subnetMask = string.Empty;
-            var parts = cidr.Split('/', StringSplitOptions.TrimEntries);
-            if (parts.Length != 2 || !int.TryParse(parts[1], out var prefix) || prefix < 0 || prefix > 32)
-                return false;
-
-            var mask = prefix == 0 ? 0U : uint.MaxValue << (32 - prefix);
-            var bytes = BitConverter.GetBytes(mask);
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(bytes);
-
-            subnetMask = new IPAddress(bytes).ToString();
-            return true;
-        }
-
-        private static string ToRangeText(string cidr)
-        {
-            if (!TryParseCidr(cidr, out var network, out var prefix) || prefix is < 1 or > 30)
-                return cidr;
-
-            var mask = uint.MaxValue << (32 - prefix);
-            var first = (network & mask) + 1;
-            var last = (network & mask | ~mask) - 1;
-            return $"{ToIpString(first)}  -  {ToIpString(last)}";
-        }
-
-        private static string ToCidrText(string text)
-        {
-            if (text.Contains('/'))
-                return text;
-
-            var parts = text.Split('-', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var firstAddress))
-                return text;
-
-            var first = ToUInt32(firstAddress);
-            var network = first & 0xFFFFFF00;
-            return $"{ToIpString(network)}/24";
-        }
-
-        private static bool TryValidateScanSubnet(string subnet, out string message)
-        {
-            var valid = NetworkAdmin.Shared.Protocol.ScanSubnet.TryNormalize(subnet, out _);
-            message = valid ? string.Empty : "Subnet không hợp lệ. Nhập IPv4 CIDR /23 đến /30 (tối đa 510 host).";
-            return valid;
-        }
-        private static bool TryParseCidr(string cidr, out uint network, out int prefix)
-        {
-            network = 0;
-            prefix = 0;
-            var parts = cidr.Split('/', StringSplitOptions.TrimEntries);
-            if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var address) || !int.TryParse(parts[1], out prefix))
-                return false;
-
-            network = ToUInt32(address);
-            return true;
-        }
-
-        private static int CountHosts(string subnet)
-        {
-            var parts = subnet.Split('/', StringSplitOptions.TrimEntries);
-            if (parts.Length == 2 && int.TryParse(parts[1], out var prefix) && prefix >= 1 && prefix <= 30)
-                return (int)Math.Min(int.MaxValue, (1L << (32 - prefix)) - 2);
-
-            return 254;
-        }
-
-        private static NetworkDeviceRow CreateDeviceRow(NetworkDevice device, DateTime scanTime)
-        {
-            return new NetworkDeviceRow
-            {
-                IpAddress = device.IpAddress,
-                Hostname = "-",
-                MacAddress = string.IsNullOrWhiteSpace(device.MacAddress) ? "-" : device.MacAddress,
-                StatusText = device.IsOnline ? "Online" : "Offline",
-                ResponseTimeText = device.ResponseTimeMs.HasValue ? device.ResponseTimeMs.Value.ToString() : "-",
-                Vendor = ResolveVendorByMac(device.MacAddress),
-                LastSeen = (device.LastSeen ?? scanTime).ToString("HH:mm:ss")
-            };
-        }
-
-        private static string ResolveVendorByMac(string macAddress)
-        {
-            if (string.IsNullOrWhiteSpace(macAddress))
-                return "Unknown";
-
-            var normalized = macAddress.Replace(":", "-").ToUpperInvariant();
-            if (normalized.Length < 8)
-                return "Unknown";
-
-            var oui = normalized[..8];
-            return oui switch
-            {
-                "54-04-63" => "MediaTek Inc.",
-                "30-4A-26" => "Intel Corporation",
-                "6C-22-1A" => "Dell Inc.",
-                "E2-A7-C3" => "Apple Inc.",
-                "AE-01-A9" => "HP Inc.",
-                "5A-D2-5B" => "Samsung Elec.",
-                _ => "Unknown"
-            };
-        }
-
-        private static bool TryGetLocalMac(string interfaceName, out string macAddress)
-        {
-            macAddress = string.Empty;
-            try
-            {
-                var ni = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
-                    .FirstOrDefault(x => x.Name.Equals(interfaceName, StringComparison.OrdinalIgnoreCase));
-                var bytes = ni?.GetPhysicalAddress().GetAddressBytes();
-                if (bytes == null || bytes.Length == 0)
-                    return false;
-
-                macAddress = string.Join("-", bytes.Select(b => b.ToString("X2")));
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static int GetIpValue(string ipAddress)
-        {
-            var parts = ipAddress.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (parts.Length != 4)
-                return int.MaxValue;
-
-            var value = 0;
-            foreach (var part in parts)
-            {
-                if (!int.TryParse(part, out var octet) || octet < 0 || octet > 255)
-                    return int.MaxValue;
-
-                value = (value << 8) + octet;
-            }
-
-            return value;
-        }
-
-        private static uint ToUInt32(IPAddress ipAddress)
-        {
-            var bytes = ipAddress.GetAddressBytes();
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(bytes);
-
-            return BitConverter.ToUInt32(bytes, 0);
-        }
-
-        private static string ToIpString(uint ipValue)
-        {
-            var bytes = BitConverter.GetBytes(ipValue);
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(bytes);
-
-            return new IPAddress(bytes).ToString();
         }
 
         private static Image? TryLoadAssetImage(string fileName)
@@ -1060,23 +839,6 @@ namespace NetworkAdminTool.Forms
             base.OnFormClosing(e);
         }
 
-        private sealed class NetworkDeviceRow
-        {
-            public string IpAddress { get; init; } = string.Empty;
-            public string Hostname { get; init; } = "-";
-            public string MacAddress { get; init; } = "-";
-            public string StatusText { get; init; } = "-";
-            public string ResponseTimeText { get; init; } = "-";
-            public string Vendor { get; init; } = "Unknown";
-            public string LastSeen { get; init; } = "-";
-        }
-
-        private enum DeviceFilter
-        {
-            All,
-            Online,
-            Offline
-        }
     }
 
     internal class RoundedPanel : Panel

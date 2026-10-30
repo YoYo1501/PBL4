@@ -16,4 +16,7 @@
     <None CopyToOutputDirectory="PreserveNewest" Update="appsettings.json" />
     <Content Include="Assets\**\*.*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="NetworkAdmin.Client.Tests" />
+  </ItemGroup>
 </Project>

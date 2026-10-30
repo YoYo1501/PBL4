@@ -61,35 +61,39 @@ internal static class LayoutValidation
         SetField(form, "_snapshots", new ClientSnapshot[] { a, b });
         var states = Field<Dictionary<string, SessionCommandState>>(form, "_commands");
         var pendingA = new SessionCommandState { PingStatus = "Pending A", ScanStatus = "Pending A" };
-        states[a.SessionId] = pendingA;
-        Select(a.SessionId);
-        Select(b.SessionId);
+        states[a.ClientId] = pendingA;
+        Field<ServerDashboardPresenter>(form, "_presenter").ObserveClients([a, b]);
+        Select(a.ClientId);
+        Select(b.ClientId);
         // Model completion of the captured A state after global selection changed to B.
         pendingA.Ping = new PingResult { Host = "A-target", Sent = 4, Received = 4 };
         pendingA.Scan = new ScanResultMessage { Success = true, Devices = [new() { IpAddress = "10.0.0.99", IsOnline = true }] };
         pendingA.PingStatus = "Completed A";
-        Select(b.SessionId);
+        Select(b.ClientId);
         var pingView = Field<PingView>(form, "_pingPage");
         var scanView = Field<ScanView>(form, "_scanner");
         if (Field<PingResult?>(pingView, "_shownResult") is not null || Field<DataGridView>(scanView, "_grid").Rows.Count != 0)
             throw new Exception("A results leaked into selected B");
         Console.WriteLine("PASS Phase 11 UI: completion for A stays hidden while B is selected");
-        Select(a.SessionId);
+        Select(a.ClientId);
         if (!ReferenceEquals(Field<PingResult?>(pingView, "_shownResult"), pendingA.Ping)
             || Field<DataGridView>(scanView, "_grid").Rows.Count != 1)
             throw new Exception("A results were not restored when selecting A");
         Console.WriteLine("PASS Phase 11 UI: selecting A restores only A Ping and Scan results");
         var reconnected = a with { SessionId = "new-session-A" };
-        SetField(form, "_snapshots", new ClientSnapshot[] { a, b, reconnected });
-        Select(reconnected.SessionId);
-        if (Field<PingResult?>(pingView, "_shownResult") is not null || Field<DataGridView>(scanView, "_grid").Rows.Count != 0)
-            throw new Exception("Old session results leaked into reconnect");
-        Console.WriteLine("PASS Phase 11 UI: new session starts with empty command results");
+        SetField(form, "_snapshots", new ClientSnapshot[] { reconnected, b });
+        Field<ServerDashboardPresenter>(form, "_presenter").ObserveClients([reconnected, b]);
+        Select(reconnected.ClientId);
+        if (!ReferenceEquals(Field<PingResult?>(pingView, "_shownResult"), pendingA.Ping)
+            || Field<DataGridView>(scanView, "_grid").Rows.Count != 1)
+            throw new Exception("Command results were not retained for the reconnecting ClientId");
+        Console.WriteLine("PASS Phase 11 UI: same ClientId retains its last Ping and Scan results after reconnect");
         reconnected = reconnected with { Interfaces = [new("Wi-Fi", "172.31.99.116", "", "172.31.98.1", "172.31.98.0/23")] };
-        SetField(form, "_snapshots", new ClientSnapshot[] { a, b, reconnected });
-        Select(reconnected.SessionId);
+        SetField(form, "_snapshots", new ClientSnapshot[] { reconnected, b });
+        Field<ServerDashboardPresenter>(form, "_presenter").ObserveClients([reconnected, b]);
+        Select(reconnected.ClientId);
         if (scanView.SubnetInput.Text != "172.31.98.0/23") throw new Exception("Late network snapshot did not prefill subnet");
-        Select(b.SessionId);
+        Select(b.ClientId);
         if (scanView.SubnetInput.Text != "") throw new Exception("Previous client subnet leaked into B");
         Console.WriteLine("PASS Phase 11 UI: late network snapshot prefills /23; B never inherits A subnet");
         var telemetry = Field<TelemetryView>(form, "_dashboardTelemetry");

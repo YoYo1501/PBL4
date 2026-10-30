@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Models;
@@ -11,6 +12,7 @@ internal sealed class TcpHelloServer
     private readonly ServerOptions _options;
     private readonly ClientManager _clientManager;
     private readonly ServerCommandDispatcher _commandDispatcher;
+    private readonly ConcurrentDictionary<TcpClient, byte> _activeClients = new();
 
     public TcpHelloServer(
         ServerOptions options,
@@ -40,11 +42,18 @@ internal sealed class TcpHelloServer
             while (!cancellationToken.IsCancellationRequested)
             {
                 var client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
+                _activeClients.TryAdd(client, 0);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    CloseClient(client);
+                    continue;
+                }
+
                 handlers.RemoveAll(t => t.IsCompleted);
-                handlers.Add(HandleClientAsync(client, connections.Token));
+                handlers.Add(ObserveClientHandlerAsync(client, connections.Token));
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         finally
@@ -52,13 +61,49 @@ internal sealed class TcpHelloServer
             _isListening = false;
             listener.Stop();
             await connections.CancelAsync();
+            foreach (var client in _activeClients.Keys)
+            {
+                CloseClient(client);
+            }
+
             await Task.WhenAll(handlers).ConfigureAwait(false);
         }
     }
 
+    private async Task ObserveClientHandlerAsync(TcpClient client, CancellationToken cancellationToken)
+    {
+        var remoteEndPoint = GetRemoteEndPoint(client);
+        try
+        {
+            await HandleClientAsync(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Unhandled client handler error from {remoteEndPoint}: {ex.Message}");
+        }
+        finally
+        {
+            CloseClient(client);
+        }
+    }
+
+    private void CloseClient(TcpClient client)
+    {
+        _activeClients.TryRemove(client, out _);
+        try { client.Dispose(); }
+        catch (Exception ex) { Console.WriteLine($"Client socket cleanup failed: {ex.Message}"); }
+    }
+
+    private static string GetRemoteEndPoint(TcpClient client)
+    {
+        try { return client.Client.RemoteEndPoint?.ToString() ?? "unknown"; }
+        catch (ObjectDisposedException) { return "unknown"; }
+        catch (SocketException) { return "unknown"; }
+    }
+
     private async Task HandleClientAsync(TcpClient client, CancellationToken serverCancellationToken)
     {
-        var remoteEndPoint = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
+        var remoteEndPoint = GetRemoteEndPoint(client);
         var sessionId = string.Empty;
 
         try
