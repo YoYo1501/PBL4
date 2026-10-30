@@ -20,6 +20,7 @@ internal sealed class ClientCommandHandler
     private readonly ConcurrentDictionary<string, byte> _remoteCommandIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _remoteCancellations = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _activePowerRequests = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _activeLockRequests = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _scanSync = new();
     private INetworkScannerService? _scannerService;
     private Task _scanTask = Task.CompletedTask;
@@ -110,6 +111,7 @@ internal sealed class ClientCommandHandler
         RemoteAdministrationCommandMessage? request = null;
         CancellationTokenSource? commandCancellation = null;
         var powerCommandEntered = false;
+        var lockCommandEntered = false;
         try
         {
             if (string.IsNullOrWhiteSpace(envelope.RequestId))
@@ -142,6 +144,27 @@ internal sealed class ClientCommandHandler
                 return;
             }
 
+            if (request.Command is RemoteAdministrationCommandType.WindowsUnlock
+                or RemoteAdministrationCommandType.ManagedWorkstationUnlock)
+            {
+                await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                    RemoteAdministrationCommandStatus.Rejected,
+                    request.Command == RemoteAdministrationCommandType.WindowsUnlock
+                        ? "Windows unlock is not available to applications. The user must unlock Windows through valid sign-in authentication."
+                        : "Managed Workstation Lock is unavailable because no supported kiosk or Windows policy is configured. No changes were made.",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (request.Command == RemoteAdministrationCommandType.ManagedWorkstationLock)
+            {
+                await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                    RemoteAdministrationCommandStatus.Rejected,
+                    "Managed Workstation Lock is unavailable because no supported kiosk or Windows policy is configured. No changes were made.",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             if (RemoteAdministrationCommandPolicy.IsPowerCommand(request.Command)
                 && !_activePowerRequests.TryAdd(envelope.RequestId, 0))
             {
@@ -150,6 +173,15 @@ internal sealed class ClientCommandHandler
                 return;
             }
             powerCommandEntered = RemoteAdministrationCommandPolicy.IsPowerCommand(request.Command);
+
+            if (request.Command == RemoteAdministrationCommandType.WindowsLock
+                && !_activeLockRequests.TryAdd(envelope.RequestId, 0))
+            {
+                await SendRemoteResultAsync(envelope.RequestId, request.Command,
+                    RemoteAdministrationCommandStatus.Rejected, "A Windows Lock command is already running.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            lockCommandEntered = request.Command == RemoteAdministrationCommandType.WindowsLock;
 
             commandCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             if (!_remoteCancellations.TryAdd(envelope.RequestId, commandCancellation))
@@ -169,6 +201,10 @@ internal sealed class ClientCommandHandler
                              $"OS={Environment.OSVersion}";
                 await SendRemoteResultAsync(envelope.RequestId, request.Command,
                     RemoteAdministrationCommandStatus.Completed, result, commandCancellation.Token).ConfigureAwait(false);
+            }
+            else if (request.Command == RemoteAdministrationCommandType.WindowsLock)
+            {
+                await ExecuteWindowsLockAsync(envelope.RequestId, request.Command, commandCancellation.Token).ConfigureAwait(false);
             }
             else
             {
@@ -197,6 +233,8 @@ internal sealed class ClientCommandHandler
                 cancellation.Dispose();
             if (powerCommandEntered)
                 _activePowerRequests.TryRemove(envelope.RequestId, out _);
+            if (lockCommandEntered)
+                _activeLockRequests.TryRemove(envelope.RequestId, out _);
         }
     }
 
@@ -271,6 +309,25 @@ internal sealed class ClientCommandHandler
             cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task ExecuteWindowsLockAsync(
+        string requestId,
+        RemoteAdministrationCommandType command,
+        CancellationToken cancellationToken)
+    {
+        await SendRemoteResultAsync(requestId, command,
+            RemoteAdministrationCommandStatus.Preparing,
+            "Preparing Windows Lock. Unlock requires valid Windows sign-in authentication.",
+            cancellationToken).ConfigureAwait(false);
+
+        if (!OperatingSystem.IsWindows() || !LockWorkStation())
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows rejected the LockWorkStation request.");
+
+        await SendRemoteResultAsync(requestId, command,
+            RemoteAdministrationCommandStatus.Completed,
+            "Windows LockWorkStation was requested. The user must unlock through Windows authentication.",
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private static void TryAbortWindowsShutdown()
     {
         try { AbortSystemShutdown(null); }
@@ -284,6 +341,9 @@ internal sealed class ClientCommandHandler
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool AbortSystemShutdown(string? machineName);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool LockWorkStation();
 
     private bool IsAuthorized(string token)
     {

@@ -32,9 +32,11 @@ internal sealed class ServerDashboardPresenter
                 if (state.PingPending) state.PingStatus = "Previous session Ping interrupted after reconnect.";
                 if (state.ScanPending) state.ScanStatus = "Previous session scan interrupted after reconnect.";
                 if (state.PowerPending) state.PowerStatus = "Previous session power command interrupted after reconnect.";
+                if (state.LockPending) state.LockStatus = "Previous session lock command interrupted after reconnect.";
                 state.PingPending = false;
                 state.ScanPending = false;
                 state.PowerPending = false;
+                state.LockPending = false;
             }
             state.SessionId = client.SessionId;
         }

@@ -9,6 +9,10 @@ public sealed class RemoteAdministrationCommandPolicyTests
     [InlineData(RemoteAdministrationCommandType.GetAgentInfo)]
     [InlineData(RemoteAdministrationCommandType.Shutdown)]
     [InlineData(RemoteAdministrationCommandType.Restart)]
+    [InlineData(RemoteAdministrationCommandType.WindowsLock)]
+    [InlineData(RemoteAdministrationCommandType.WindowsUnlock)]
+    [InlineData(RemoteAdministrationCommandType.ManagedWorkstationLock)]
+    [InlineData(RemoteAdministrationCommandType.ManagedWorkstationUnlock)]
     public void Supported_commands_are_accepted(RemoteAdministrationCommandType command)
     {
         var request = new RemoteAdministrationCommandMessage

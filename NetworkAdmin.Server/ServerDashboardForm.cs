@@ -58,6 +58,18 @@ internal sealed class ServerDashboardForm : Form
         TextAlign = HorizontalAlignment.Center
     };
     private readonly Label _powerStatus = DashboardTheme.Label("No shutdown or restart command executed for this session.", 9, color: DashboardTheme.Muted);
+    private readonly Button _lockButton = DashboardTheme.Button("Lock", false);
+    private readonly Button _unlockButton = DashboardTheme.Button("Unlock", false);
+    private readonly ComboBox _lockMode = new()
+    {
+        Dock = DockStyle.Fill,
+        DropDownStyle = ComboBoxStyle.DropDownList,
+        BackColor = DashboardTheme.Input,
+        ForeColor = DashboardTheme.Text,
+        FlatStyle = FlatStyle.Flat,
+        Margin = new Padding(4)
+    };
+    private readonly Label _lockStatus = DashboardTheme.Label("No lock command executed for this session.", 9, color: DashboardTheme.Muted);
     private readonly DataGridView _clients = DashboardTheme.Grid(("Status", "Status", 80), ("Hostname", "Hostname", 160),
         ("IPv4", "IPv4", 115), ("MAC", "MAC", 140), ("CPU", "CPU", 60), ("RAM", "RAM", 60), ("LastSeen", "Last Seen", 140));
     private readonly DataGridView _interfaces = DashboardTheme.Grid(("Name", "Interface", 110), ("IpAddress", "IPv4", 105),
@@ -79,6 +91,8 @@ internal sealed class ServerDashboardForm : Form
     private Task? _agentInfoTask;
     private Task? _powerTask;
     private CancellationTokenSource? _powerCancellation;
+    private Task? _lockTask;
+    private CancellationTokenSource? _lockCancellation;
 
     public ServerDashboardForm(ServerRuntime runtime)
     {
@@ -148,6 +162,10 @@ internal sealed class ServerDashboardForm : Form
         _shutdownButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Shutdown);
         _restartButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Restart);
         _cancelPowerButton.Click += (_, _) => _powerCancellation?.Cancel();
+        _lockMode.Items.AddRange(["Windows Lock (unlock requires Windows sign-in)", "Managed Workstation Lock (policy required)"]);
+        _lockMode.SelectedIndex = 0;
+        _lockButton.Click += (_, _) => _lockTask = LockAsync(true);
+        _unlockButton.Click += (_, _) => _lockTask = LockAsync(false);
         _dashboardScan.ScanButton.Click += (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(_scanner.SubnetInput.Text)) { Navigate("IP Scanner"); _scanner.SubnetInput.Focus(); }
@@ -247,13 +265,13 @@ internal sealed class ServerDashboardForm : Form
 
     private Control BuildClients()
     {
-        var page = DashboardTheme.Rows(-100, 280, 190, 126);
+        var page = DashboardTheme.Rows(-100, 280, 190, 210);
         var fleet = new DashboardCard("Managed Stations / Select a row to manage that session"); fleet.Body.Controls.Add(_clients);
         page.Controls.Add(fleet, 0, 0); page.Controls.Add(_clientsDetail, 0, 1);
         var adapters = new DashboardCard("All Reported Interfaces / Physical and virtual adapters"); adapters.Body.Controls.Add(_interfaces);
         page.Controls.Add(adapters, 0, 2);
         var remote = new DashboardCard("Remote Administration / Read-only and power commands");
-        var remoteRows = DashboardTheme.Rows(38, 30, 30);
+        var remoteRows = DashboardTheme.Rows(38, 30, 30, 34, 30);
         var remoteActions = DashboardTheme.Table(5, 1);
         foreach (var width in new[] { 155, 125, 125, 105, 120 })
             remoteActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
@@ -270,6 +288,15 @@ internal sealed class ServerDashboardForm : Form
         remoteRows.Controls.Add(remoteActions, 0, 0);
         remoteRows.Controls.Add(_agentInfoStatus, 0, 1);
         remoteRows.Controls.Add(_powerStatus, 0, 2);
+        var lockActions = DashboardTheme.Table(3, 1);
+        lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        lockActions.Controls.Add(_lockButton, 0, 0);
+        lockActions.Controls.Add(_unlockButton, 1, 0);
+        lockActions.Controls.Add(_lockMode, 2, 0);
+        remoteRows.Controls.Add(lockActions, 0, 3);
+        remoteRows.Controls.Add(_lockStatus, 0, 4);
         remote.Body.Controls.Add(remoteRows);
         page.Controls.Add(remote, 0, 3);
         return page;
@@ -404,6 +431,11 @@ internal sealed class ServerDashboardForm : Form
         _powerCountdown.Enabled = enabled && !state.PowerPending;
         _powerStatus.Text = state.PowerStatus;
         _powerStatus.ForeColor = state.PowerError ? DashboardTheme.Red : DashboardTheme.Muted;
+        _lockButton.Enabled = enabled && !state.LockPending;
+        _unlockButton.Enabled = enabled && !state.LockPending;
+        _lockMode.Enabled = enabled && !state.LockPending;
+        _lockStatus.Text = state.LockStatus;
+        _lockStatus.ForeColor = state.LockError ? DashboardTheme.Red : DashboardTheme.Muted;
         var key = c?.SessionId + string.Join(";", c?.Interfaces ?? []);
         if (_interfaceKey != key)
         {
@@ -538,6 +570,89 @@ internal sealed class ServerDashboardForm : Form
         catch (InvalidOperationException) { }
     }
 
+    private async Task LockAsync(bool lockClient)
+    {
+        var client = Selected;
+        if (client?.Connected != true) return;
+        var state = _presenter.CommandsFor(client.ClientId);
+        if (state.LockPending) return;
+
+        var managed = _lockMode.SelectedIndex == 1;
+        var action = lockClient ? "lock" : "unlock";
+        var mode = managed ? "Managed Workstation Lock" : "Windows Lock";
+        var confirmation = MessageBox.Show(this,
+            $"Are you sure you want to {action} '{client.Hostname}' using {mode}?",
+            $"Confirm {action}", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (confirmation != DialogResult.Yes) return;
+
+        var command = managed
+            ? (lockClient ? RemoteAdministrationCommandType.ManagedWorkstationLock : RemoteAdministrationCommandType.ManagedWorkstationUnlock)
+            : (lockClient ? RemoteAdministrationCommandType.WindowsLock : RemoteAdministrationCommandType.WindowsUnlock);
+        var sessionId = client.SessionId;
+        state.LockPending = true;
+        state.LockError = false;
+        state.LockStatus = $"Sending {mode} {action} command to {client.Hostname}...";
+        RenderSelection();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _lockCancellation = cancellation;
+        try
+        {
+            var result = await _runtime.SendRemoteAdministrationAsync(
+                client.ClientId,
+                command,
+                cancellation.Token,
+                progress: update => UpdateLockProgress(client.ClientId, sessionId, state, update));
+            if (_closing || !_presenter.IsCurrentSession(client.ClientId, sessionId, state)) return;
+            state.LockError = result.Status != RemoteAdministrationCommandStatus.Completed;
+            state.LockStatus = FormatLockResult(result);
+        }
+        catch (Exception ex)
+        {
+            if (!_closing && _presenter.IsCurrentSession(client.ClientId, sessionId, state))
+            {
+                state.LockError = true;
+                state.LockStatus = $"{mode} {action} failed: {ex.Message}";
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_lockCancellation, cancellation)) _lockCancellation = null;
+            if (state.SessionId == sessionId) state.LockPending = false;
+            if (!_closing) RefreshState();
+        }
+    }
+
+    private void UpdateLockProgress(string clientId, string sessionId, SessionCommandState state,
+        RemoteAdministrationResultMessage result)
+    {
+        if (_closing || IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (_closing || !_presenter.IsCurrentSession(clientId, sessionId, state)) return;
+                state.LockError = result.Status is RemoteAdministrationCommandStatus.Rejected
+                    or RemoteAdministrationCommandStatus.Failed or RemoteAdministrationCommandStatus.Timeout;
+                state.LockStatus = result.Status switch
+                {
+                    RemoteAdministrationCommandStatus.Accepted when result.ErrorMessage == "Command sent to client."
+                        => "Command sent to client; waiting for acceptance...",
+                    RemoteAdministrationCommandStatus.Accepted => "Client accepted the command; waiting to prepare...",
+                    RemoteAdministrationCommandStatus.Preparing => "Client accepted the command and is preparing the lock action...",
+                    _ => FormatLockResult(result)
+                };
+                RenderSelection();
+            }));
+        }
+        catch (InvalidOperationException) { }
+    }
+
+    private static string FormatLockResult(RemoteAdministrationResultMessage result) =>
+        result.Status == RemoteAdministrationCommandStatus.Completed
+            ? result.Result
+            : $"Lock command {result.Status}: {result.ErrorMessage}";
+
     private async void CloseAsync(object? sender, FormClosingEventArgs e)
     {
         if (_closed) return;
@@ -547,9 +662,11 @@ internal sealed class ServerDashboardForm : Form
         try
         {
             _powerCancellation?.Cancel();
+            _lockCancellation?.Cancel();
             await _lifetime.CancelAsync(); await _runtime.StopAsync();
             await Task.WhenAll(_pingTask ?? Task.CompletedTask, _scanTask ?? Task.CompletedTask,
-                _agentInfoTask ?? Task.CompletedTask, _powerTask ?? Task.CompletedTask);
+                _agentInfoTask ?? Task.CompletedTask, _powerTask ?? Task.CompletedTask,
+                _lockTask ?? Task.CompletedTask);
         }
         catch (Exception ex) { Console.WriteLine($"Server shutdown: {ex.Message}"); }
         finally { _closed = true; Close(); }
