@@ -15,5 +15,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\NetworkAdmin.Client\NetworkAdmin.Client.csproj" />
+    <ProjectReference Include="..\NetworkAdmin.Server\NetworkAdmin.Server.csproj" />
+    <Compile Include="..\NetworkAdmin.Server\Validation\TestClientFixture.cs" Link="TestClientFixture.cs" />
   </ItemGroup>
 </Project>

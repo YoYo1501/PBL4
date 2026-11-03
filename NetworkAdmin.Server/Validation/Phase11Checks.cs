@@ -2,14 +2,13 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using NetworkAdmin.Client;
-using NetworkAdmin.Client.Services;
+using NetworkAdmin.Client.Infrastructure.Runtime;
 using NetworkAdmin.Server;
 using NetworkAdmin.Server.UI;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
-using NetworkAdminTool.Interfaces;
+using NetworkAdmin.Client.Application.Interfaces;
 using NetworkAdmin.Shared.Models;
-using NetworkAdminTool.Services;
 
 internal static class Phase11Checks
 {
@@ -58,10 +57,11 @@ internal static class Phase11Checks
     private static async Task CheckReconnectAsync(Action<bool, string> check, INetworkInfoService network)
     {
         var port = ReservePort();
-        var options = new ServerOptions { Host = IPAddress.Loopback, Port = port };
+        var clientFixture = new TestClientFixture();
+        var options = clientFixture.ServerOptions(IPAddress.Loopback, port);
         var server = new ServerRuntime(options);
         var blocking = new BlockingScanner();
-        var client = new ClientRuntime(new ClientOptions { Host = "127.0.0.1", Port = port, TelemetryInterval = TimeSpan.FromMilliseconds(200) },
+        var client = new ClientRuntime(clientFixture.ClientOptions("127.0.0.1", port),
             network, new PingService(), blocking, new FixedMonitor());
         ServerRuntime? restarted = null;
         client.Start(); // Deliberately start before the listener: first attempt must recover.
@@ -90,7 +90,7 @@ internal static class Phase11Checks
             var oldSession = first.SessionId;
             var manager = (ClientManager)typeof(ServerRuntime).GetField("_clients", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(server)!;
             manager.TryGet(oldSession, out var connected);
-            connected!.Stream.Socket.LingerState = new LingerOption(true, 0);
+            connected!.Socket!.LingerState = new LingerOption(true, 0);
             connected.Stream.Dispose(); // Abrupt socket reset, without a graceful application shutdown.
             await Eventually(() => server.GetClients().Any(c => c.Connected && c.SessionId != oldSession && c.Cpu == 17));
             first = server.GetClients().Single(c => c.Connected);
@@ -101,7 +101,7 @@ internal static class Phase11Checks
             {
                 var staleSessionId = first.SessionId;
                 manager.TryGet(staleSessionId, out var staleSession);
-                staleSession!.Stream.Socket.LingerState = new LingerOption(true, 0);
+                staleSession!.Socket!.LingerState = new LingerOption(true, 0);
                 staleSession.Stream.Dispose();
                 await Eventually(() => server.GetClients().Any(c => c.Connected
                     && c.ClientId == first.ClientId && c.SessionId != staleSessionId && c.Cpu == 17));
@@ -197,20 +197,20 @@ internal static class Phase11Checks
     private static async Task CheckShutdownClosesIdleClientAsync(Action<bool, string> check)
     {
         var port = ReservePort();
-        var server = new ServerRuntime(new ServerOptions { Host = IPAddress.Loopback, Port = port });
+        var server = new ServerRuntime(new TestClientFixture().ServerOptions(IPAddress.Loopback, port));
         server.Start();
         await Eventually(() => server.IsRunning);
 
         using var peer = new TcpClient();
-        await peer.ConnectAsync(IPAddress.Loopback, port);
-        // A partial frame leaves the handler blocked in its hello read until shutdown.
-        await peer.GetStream().WriteAsync("{"u8.ToArray());
+        await using var tls = await TestClientFixture.ConnectTcpAsync(peer, "127.0.0.1", port);
+        // A partial JSON frame leaves Hello incomplete until shutdown.
+        await tls.WriteAsync(new byte[] { (byte)'{' });
         await Task.Delay(100);
 
         await server.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
-        var read = await peer.GetStream().ReadAsync(new byte[1]).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        var read = await tls.ReadAsync(new byte[1]).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
         check(read == 0 && !server.IsRunning,
-            "Phase 11: shutdown closes a client blocked in the hello frame and awaits its handler");
+            "Phase 11: shutdown closes a client with an incomplete Hello frame and awaits its handler");
     }
 
     private static int ReservePort()
@@ -251,7 +251,7 @@ internal static class Phase11Checks
         public TaskCompletionSource Canceled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string? LastSubnet { get; private set; }
         public async Task<List<NetworkDevice>> ScanNetworkAsync(string subnet, int timeoutMs = 300, string? interfaceName = null,
-            CancellationToken cancellationToken = default, IProgress<NetworkAdminTool.Models.NetworkScanProgress>? progress = null)
+            CancellationToken cancellationToken = default, IProgress<NetworkAdmin.Client.Application.Models.NetworkScanProgress>? progress = null)
         {
             LastSubnet = subnet; Started.TrySetResult();
             try { await Task.Delay(Timeout.Infinite, cancellationToken); return []; }

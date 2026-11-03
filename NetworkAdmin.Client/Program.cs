@@ -1,11 +1,17 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using NetworkAdmin.Client.Services;
-using NetworkAdmin.Client.Presentation;
-using NetworkAdminTool.Forms;
-using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Services;
+using NetworkAdmin.Client.Application.State;
+using NetworkAdmin.Client.Infrastructure.Configuration;
+using NetworkAdmin.Client.Infrastructure.Networking;
+using NetworkAdmin.Client.Application.Interfaces;
+using NetworkAdmin.Client.Infrastructure.Logging;
+using NetworkAdmin.Client.Infrastructure.Monitoring;
+using NetworkAdmin.Client.Infrastructure.Runtime;
+using NetworkAdmin.Client.Infrastructure.Scanning;
+using NetworkAdmin.Client.UI.Services;
+using NetworkAdmin.Client.Application.Presentation;
+using NetworkAdmin.Client.UI.Forms;
 
 namespace NetworkAdmin.Client;
 
@@ -16,7 +22,17 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
         var standalone = args.Contains("--standalone", StringComparer.OrdinalIgnoreCase);
-        var options = ClientOptions.Load(args);
+        ClientOptions options;
+        try
+        {
+            options = standalone ? new ClientOptions() : ClientOptions.Load(args);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Client configuration failed: {ex.Message}", "NetworkAdmin Client",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
         using var host = Host.CreateDefaultBuilder(args)
             .ConfigureAppConfiguration((_, configuration) =>
             {
@@ -34,9 +50,11 @@ internal static class Program
                     provider.GetRequiredService<INetworkInfoService>()));
                 services.AddSingleton<ISystemMonitorService, SystemMonitorService>();
                 services.AddSingleton<NetworkDashboardState>();
+                services.AddSingleton<ScreenShareUi>();
                 services.AddSingleton<DashboardPresenter>();
                 services.AddTransient<ScannerPresenter>();
-                services.AddSingleton<MainForm>(provider => new MainForm(provider, provider.GetRequiredService<DashboardPresenter>()));
+                services.AddSingleton<MainForm>(provider => new MainForm(provider,
+                    provider.GetRequiredService<DashboardPresenter>(), provider.GetRequiredService<ScreenShareUi>()));
                 services.AddTransient<ScannerForm>(provider => new ScannerForm(provider.GetRequiredService<ScannerPresenter>()));
                 services.AddTransient<PingForm>();
                 services.AddTransient<MonitorForm>();
@@ -50,15 +68,17 @@ internal static class Program
                     provider.GetRequiredService<INetworkInfoService>(),
                     provider.GetRequiredService<IPingService>(),
                     provider.GetRequiredService<INetworkScannerService>(),
-                    provider.GetRequiredService<ISystemMonitorService>()));
+                    provider.GetRequiredService<ISystemMonitorService>(),
+                    provider.GetRequiredService<ScreenShareUi>()));
             })
             .Build();
 
         // Keep Application.Run on the STA entry thread even if host startup is asynchronous.
         host.StartAsync().GetAwaiter().GetResult();
+        var mainForm = host.Services.GetRequiredService<MainForm>();
         var runtime = host.Services.GetRequiredService<ClientRuntime>();
         if (!standalone) runtime.Start();
-        Application.Run(host.Services.GetRequiredService<MainForm>());
+        System.Windows.Forms.Application.Run(mainForm);
         runtime.StopAsync().GetAwaiter().GetResult();
         host.StopAsync().GetAwaiter().GetResult();
     }

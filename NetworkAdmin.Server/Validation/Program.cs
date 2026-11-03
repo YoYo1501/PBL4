@@ -2,11 +2,10 @@ using System.Net;
 using System.Net.Sockets;
 using NetworkAdmin.Server;
 using NetworkAdmin.Server.UI;
-using NetworkAdmin.Client.Services;
+using NetworkAdmin.Client.Infrastructure.Runtime;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Models;
-using NetworkAdminTool.Services;
 
 var checks = 0;
 void Check(bool condition, string description)
@@ -53,7 +52,8 @@ using (var canceled = new CancellationTokenSource())
 
 var reserve = new TcpListener(IPAddress.Loopback, 0); reserve.Start();
 var port = ((IPEndPoint)reserve.LocalEndpoint).Port; reserve.Stop();
-var runtime = new ServerRuntime(new ServerOptions { Host = IPAddress.Loopback, Port = port });
+var clientFixture = new TestClientFixture();
+var runtime = new ServerRuntime(clientFixture.ServerOptions(IPAddress.Loopback, port));
 runtime.Start();
 await Eventually(() => runtime.IsRunning);
 try
@@ -124,8 +124,9 @@ try
     Check(!nextPing.IsCompleted, "Phase 11: delayed old request result cannot complete new session command");
     await reconnectedA.Send(MessageType.PingResult, nextRequest.RequestId, ping);
     await nextPing;
-    using var malformed = new TcpClient(); await malformed.ConnectAsync(IPAddress.Loopback, port);
-    await malformed.GetStream().WriteAsync("not-json\n"u8.ToArray());
+    using var malformed = new TcpClient();
+    await using var malformedStream = await TestClientFixture.ConnectTcpAsync(malformed, "127.0.0.1", port);
+    await malformedStream.WriteAsync("not-json\n"u8.ToArray());
     await b.Stats(70, 90);
     await Eventually(() => runtime.GetClients().Single(c => c.SessionId == b.SessionId).Cpu == 70);
     Check(runtime.IsRunning, "Malformed peer does not stop server or other telemetry");
@@ -157,11 +158,12 @@ Console.WriteLine($"ALL {checks} CHECKS PASSED");
 sealed class Agent : IDisposable
 {
     private readonly TcpClient _client = new();
+    private NetworkStream? _stream;
     public string SessionId { get; private set; } = "";
     public static async Task<Agent> Connect(int port, string name, string ip)
     {
         var agent = new Agent();
-        await agent._client.ConnectAsync(IPAddress.Loopback, port);
+        agent._stream = await TestClientFixture.ConnectTcpAsync(agent._client, "127.0.0.1", port);
         await agent.Send(MessageType.Hello, "hello", new HelloMessage { ClientId = name, ClientName = name });
         agent.SessionId = JsonLineProtocol.GetPayload<HelloAckMessage>(await agent.Read())!.SessionId;
         await agent.Send(MessageType.NetworkInfo, "network", new ClientNetworkInfo { Hostname = name,
@@ -169,11 +171,11 @@ sealed class Agent : IDisposable
         return agent;
     }
     public Task Stats(float cpu, float ram) => Send(MessageType.SystemStats, Guid.NewGuid().ToString(), new SystemStats { CpuUsagePercent = cpu, RamUsagePercent = ram });
-    public Task Send<T>(MessageType type, string id, T data) => JsonLineProtocol.SendAsync(_client.GetStream(), type, id, data);
+    public Task Send<T>(MessageType type, string id, T data) => JsonLineProtocol.SendAsync(_stream!, type, id, data);
     public async Task<MessageEnvelope> Read()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        return await JsonLineProtocol.ReceiveAsync(_client.GetStream(), cancellationToken: timeout.Token) ?? throw new IOException("Unexpected EOF");
+        return await JsonLineProtocol.ReceiveAsync(_stream!, cancellationToken: timeout.Token) ?? throw new IOException("Unexpected EOF");
     }
     public void Dispose() => _client.Dispose();
 }

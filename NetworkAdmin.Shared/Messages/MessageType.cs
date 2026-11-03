@@ -12,5 +12,10 @@ public enum MessageType
     ScanResult = 8,
     RemoteAdministrationCommand = 9,
     RemoteAdministrationResult = 10,
-    RemoteAdministrationCancel = 11
+    RemoteAdministrationCancel = 11,
+    ScreenShareRequest = 12,
+    ScreenShareConsent = 13,
+    ScreenShareStop = 14,
+    ScreenChannelReady = 15,
+    ScreenShareStart = 16
 }

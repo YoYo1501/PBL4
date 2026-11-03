@@ -21,7 +21,7 @@ public static class JsonLineProtocol
     }
 
     public static async Task SendAsync<TPayload>(
-        NetworkStream stream,
+        Stream stream,
         MessageType type,
         string requestId,
         TPayload payload,
@@ -41,7 +41,7 @@ public static class JsonLineProtocol
     }
 
     public static async Task<MessageEnvelope?> ReceiveAsync(
-        NetworkStream stream,
+        Stream stream,
         int maxFrameBytes = DefaultMaxFrameBytes,
         CancellationToken cancellationToken = default)
     {
@@ -60,7 +60,7 @@ public static class JsonLineProtocol
     }
 
     private static async Task<string?> ReadFrameAsync(
-        NetworkStream stream,
+        Stream stream,
         int maxFrameBytes,
         CancellationToken cancellationToken)
     {

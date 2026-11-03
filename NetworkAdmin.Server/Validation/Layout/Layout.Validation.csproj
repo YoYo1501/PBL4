@@ -8,7 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
-    <Compile Include="..\..\*.cs" Exclude="..\..\Program.cs" />
-    <Compile Include="..\..\UI\*.cs" />
+    <ProjectReference Include="..\..\NetworkAdmin.Server.csproj" />
   </ItemGroup>
 </Project>

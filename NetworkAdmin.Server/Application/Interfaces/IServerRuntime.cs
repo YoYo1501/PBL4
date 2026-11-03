@@ -1,0 +1,26 @@
+namespace NetworkAdmin.Server.Application.Interfaces;
+
+public interface IServerRuntime
+{
+    string Endpoint { get; }
+    string Status { get; }
+    bool IsRunning { get; }
+    void Start();
+    Task StopAsync();
+    Task<IScreenViewerSession> RequestScreenAsync(string clientId, string sessionId, CancellationToken token,
+        Action? onConnecting = null);
+    bool IsScreenSharing(string clientId);
+    IReadOnlyList<ClientSnapshot> GetClients();
+    Task<PingResult> PingAsync(string sessionId, string target, CancellationToken token);
+    Task<ScanResultMessage> ScanAsync(string sessionId, string subnet, CancellationToken token,
+        int timeoutMs = 800);
+    Task<RemoteAdministrationResultMessage> GetAgentInfoAsync(string clientId, CancellationToken token,
+        TimeSpan? timeout = null);
+    Task<RemoteAdministrationResultMessage> PowerClientAsync(string clientId, RemoteAdministrationCommandType command,
+        int countdownSeconds, CancellationToken token, Action<RemoteAdministrationResultMessage>? progress = null,
+        TimeSpan? timeout = null);
+    Task<RemoteAdministrationResultMessage> SendRemoteAdministrationAsync(string clientId,
+        RemoteAdministrationCommandType command, CancellationToken token,
+        Action<RemoteAdministrationResultMessage>? progress = null, TimeSpan? timeout = null);
+    IReadOnlyList<ScanHostSnapshot> MapScanResult(ScanResultMessage result, IReadOnlyList<ClientSnapshot> clients);
+}

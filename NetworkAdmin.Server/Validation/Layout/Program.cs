@@ -50,6 +50,46 @@ internal static class LayoutValidation
                     throw new Exception("Card overflows its allocated row: " + card.Heading.Text);
             Console.WriteLine($"PASS {size.Width}x{size.Height}, DPI={form.DeviceDpi}: title, navigation and card bounds. Render: {path}");
         }
+        ValidateRemoteViewer(sizes);
+    }
+
+    private static void ValidateRemoteViewer(IEnumerable<Size> sizes)
+    {
+        foreach (var size in sizes)
+        {
+            using var form = new RemoteViewerForm("Layout Client", "layout-client-id", new LayoutViewerSession());
+            _ = form.Handle;
+            form.ClientSize = size;
+            form.PerformAutoScale();
+            form.PerformLayout();
+            var root = form.Controls[0];
+            form.Controls.Remove(root);
+            root.Dock = DockStyle.None;
+            root.Size = size;
+            root.CreateControl();
+            root.PerformLayout();
+            foreach (Control control in Descendants(root)) control.PerformLayout();
+
+            var controls = Descendants(root).ToArray();
+            foreach (var button in controls.OfType<Button>())
+            {
+                if (button.Width < TextRenderer.MeasureText(button.Text, button.Font).Width + 12 ||
+                    button.Height < button.Font.Height + 8 || button.Right > button.Parent!.ClientSize.Width + 1)
+                    throw new Exception($"Remote Viewer button is clipped at {size}: {button.Text}; button={button.Bounds}, parent={button.Parent!.ClientSize}, text={TextRenderer.MeasureText(button.Text, button.Font)}");
+            }
+            var state = controls.OfType<Label>().Single(label => label.Text == "WAITING");
+            var frameArea = controls.OfType<PictureBox>().Single().Parent!;
+            if (state.Height < state.Font.Height || frameArea.Width < 400 || frameArea.Height < 240)
+                throw new Exception($"Remote Viewer content is clipped at {size}: state={state.Bounds}/{state.Font.Height}, canvas={frameArea.Bounds}");
+
+            using var bitmap = new Bitmap(size.Width, size.Height);
+            root.DrawToBitmap(bitmap, new Rectangle(Point.Empty, size));
+            var output = Path.GetFullPath("artifacts/layout");
+            Directory.CreateDirectory(output);
+            var path = Path.Combine(output, $"remote-viewer-{size.Width}-dpi{form.DeviceDpi}.png");
+            bitmap.Save(path);
+            Console.WriteLine($"PASS RemoteViewer {size.Width}x{size.Height}, DPI={form.DeviceDpi}: controls fit and render. Render: {path}");
+        }
     }
     private static void ValidateSessionSelection()
     {
@@ -119,5 +159,13 @@ internal static class LayoutValidation
             yield return child;
             foreach (var descendant in Descendants(child)) yield return descendant;
         }
+    }
+
+    private sealed class LayoutViewerSession : IScreenViewerSession
+    {
+        public Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<(long Sequence, byte[] Jpeg)?>(null);
+        public Task StopAsync(string reason = "Viewer closed.") => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
