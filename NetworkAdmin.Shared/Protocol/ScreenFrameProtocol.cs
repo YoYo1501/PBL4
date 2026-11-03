@@ -4,7 +4,7 @@ namespace NetworkAdmin.Shared.Protocol;
 
 public static class ScreenFrameProtocol
 {
-    public const int MaxFrameBytes = 5 * 1024 * 1024;
+    public const int MaxFrameBytes = 12 * 1024 * 1024;
     public const int HeaderBytes = sizeof(int) + sizeof(long);
 
     public static async Task WriteFrameAsync(Stream stream, long sequence, ReadOnlyMemory<byte> jpeg,
