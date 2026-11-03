@@ -10,7 +10,7 @@ internal sealed class RemoteViewerForm : Form
     private readonly string _clientName;
     private readonly string _clientId;
     private readonly Panel _canvas = new() { Dock = DockStyle.Fill, AutoScroll = false, BackColor = DashboardTheme.Background };
-    private readonly PictureBox _picture = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(1, 10, 18), TabStop = true };
+    private readonly PictureBox _picture = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.StretchImage, BackColor = Color.FromArgb(1, 10, 18), TabStop = true };
     private readonly Label _state = DashboardTheme.Label("WAITING", 9, true, DashboardTheme.Muted);
     private readonly Label _fps = DashboardTheme.Label("-- FPS", 9, true, DashboardTheme.Blue);
     private readonly Label _resolution = DashboardTheme.Label("-- × --", 9, color: DashboardTheme.Muted);
@@ -50,6 +50,7 @@ internal sealed class RemoteViewerForm : Form
         StartPosition = FormStartPosition.CenterParent;
         MinimumSize = new Size(720, 480);
         ClientSize = new Size(1180, 760);
+        WindowState = FormWindowState.Maximized;
         BackColor = DashboardTheme.Background;
         ForeColor = DashboardTheme.Text;
         Font = new Font("Segoe UI", 9F);
@@ -57,7 +58,7 @@ internal sealed class RemoteViewerForm : Form
         BuildLayout();
         _presenter.StateChanged += OnStateChanged;
         _presenter.FrameReceived += OnFrameReceived;
-        _toolTip.SetToolTip(_resolution, "Decoded JPEG frame resolution; the Client may downscale its virtual desktop before encoding.");
+        _toolTip.SetToolTip(_resolution, "Decoded frame resolution. The image fills the Viewer canvas, matching the RemoteX viewing layout.");
         _fitButton.Click += (_, _) => SetFitMode();
         _actualButton.Click += (_, _) => SetActualSizeMode();
         _fullScreenButton.Click += (_, _) => ToggleFullScreen();
@@ -252,7 +253,7 @@ internal sealed class RemoteViewerForm : Form
         _actualSize = false;
         _canvas.AutoScroll = false;
         _picture.Dock = DockStyle.Fill;
-        _picture.SizeMode = PictureBoxSizeMode.Zoom;
+        _picture.SizeMode = PictureBoxSizeMode.StretchImage;
     }
 
     private void SetActualSizeMode()
@@ -351,6 +352,12 @@ internal sealed class RemoteViewerForm : Form
             displayHeight = image.Height * scale;
             offsetX = (_picture.ClientSize.Width - displayWidth) / 2;
             offsetY = (_picture.ClientSize.Height - displayHeight) / 2;
+        }
+        else if (_picture.SizeMode == PictureBoxSizeMode.StretchImage)
+        {
+            displayWidth = _picture.ClientSize.Width;
+            displayHeight = _picture.ClientSize.Height;
+            offsetX = offsetY = 0;
         }
         else
         {
