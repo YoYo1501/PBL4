@@ -15,7 +15,15 @@ internal static class Program
             return;
         }
         ApplicationConfiguration.Initialize();
-        Application.Run(new ServerDashboardForm(new ServerRuntime(ServerOptions.Load(args))));
+        try
+        {
+            System.Windows.Forms.Application.Run(new ServerDashboardForm(new ServerRuntime(ServerOptions.Load(args))));
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Server configuration failed: {ex.Message}", "NetworkAdmin Server",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]

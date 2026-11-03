@@ -1,8 +1,9 @@
-using NetworkAdmin.Client.Presentation;
+using NetworkAdmin.Client.Application.State;
+using NetworkAdmin.Client.Application.Presentation;
 using NetworkAdmin.Shared.Models;
-using NetworkAdminTool.Interfaces;
-using NetworkAdminTool.Models;
-using NetworkAdminTool.Services;
+using NetworkAdmin.Client.Application.Interfaces;
+using NetworkAdmin.Client.Application.Models;
+using NetworkAdmin.Client.Infrastructure.Runtime;
 using Xunit;
 
 namespace NetworkAdmin.Client.Tests;

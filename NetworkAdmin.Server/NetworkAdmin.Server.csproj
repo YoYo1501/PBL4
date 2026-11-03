@@ -13,6 +13,9 @@
   <ItemGroup>
     <Compile Remove="Validation\**\*.cs" />
     <ProjectReference Include="..\NetworkAdmin.Shared\NetworkAdmin.Shared.csproj" />
+    <InternalsVisibleTo Include="NetworkAdmin.Client.Tests" />
+    <InternalsVisibleTo Include="Phase10.Validation" />
+    <InternalsVisibleTo Include="Layout.Validation" />
   </ItemGroup>
 
 </Project>

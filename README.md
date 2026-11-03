@@ -14,7 +14,10 @@ NetworkAdminTool/
 │   ├── Program.cs
 │   └── NetworkAdmin.Client.csproj
 ├── NetworkAdmin.Server/
-│   ├── UI/                 # Giao diện quản trị
+│   ├── Domain/             # Kiểu nghiệp vụ cốt lõi
+│   ├── Application/        # Interface, snapshot và luồng xử lý dashboard
+│   ├── Infrastructure/     # TCP, session, command, runtime, audit, cấu hình
+│   ├── UI/                 # Forms, views, theme và presenter giao diện
 │   ├── Validation/         # Chương trình kiểm tra
 │   ├── Program.cs
 │   └── NetworkAdmin.Server.csproj
@@ -69,6 +72,27 @@ dotnet run --project NetworkAdmin.Client -- --standalone
 
    Thay `192.168.1.10` bằng địa chỉ IPv4 thực tế của máy Server. Đảm bảo hai máy thông mạng và cùng cho phép lưu lượng TCP 5000.
 
+### Screen Streaming demo trên LAN tin cậy
+
+Bản demo PBL4 dùng TCP **không mã hóa** cho cả kênh điều khiển (mặc định cổng 5000) và kênh frame riêng (mặc định cổng 5001). Chỉ chạy trong mạng LAN tin cậy, cô lập; không dùng trên Wi-Fi công cộng, mạng không tin cậy hoặc Internet. Lưu lượng, telemetry và capability phiên có thể bị quan sát hoặc giả mạo bởi thiết bị có quyền truy cập cùng mạng. Không có cấu hình TLS certificate, CA thumbprint, certificate pin hoặc Enrollment trong luồng chạy này.
+
+Khởi chạy Server:
+
+```powershell
+dotnet run --no-launch-profile --project NetworkAdmin.Server -- --host 0.0.0.0 --port 5000 --screen-port 5001
+```
+
+Khởi chạy Client với IP LAN của Server:
+
+```powershell
+dotnet run --no-launch-profile --project NetworkAdmin.Client -- --host <SERVER_LAN_IP> --port 5000
+```
+
+Client tự kết nối và reconnect. Trong dashboard Server, chọn Client Online rồi nhấn **View Screen**. Client phải bấm chấp thuận trước khi Server cấp capability một lần và Client mở kênh ảnh. Từ chối, Stop Sharing, đóng Viewer, disconnect hoặc reconnect đều kết thúc phiên; consent không được khôi phục sau reconnect. Mỗi Client chỉ có tối đa một phiên xem.
+
+Streaming mặc định giới hạn 8 FPS, JPEG quality 58 và ảnh đầu ra tối đa 1600×1000. Có thể đặt trên Client bằng `--screen-fps` (1–20), `--screen-jpeg-quality` (30–85), `--screen-max-width` (640–2560) và `--screen-max-height` (480–1440); cấu hình tương ứng qua biến `NETWORKADMIN_SCREEN_FPS`, `NETWORKADMIN_SCREEN_JPEG_QUALITY`, `NETWORKADMIN_SCREEN_MAX_WIDTH` và `NETWORKADMIN_SCREEN_MAX_HEIGHT`. Viewer dùng hàng đợi một frame mới nhất, giới hạn giải mã ở 2560×1440 và chỉ cập nhật bitmap mới nhất lên UI.
+
+Chỉ mở inbound TCP 5000 và 5001 cho Private network profile và máy trong LAN demo. Đặt cùng `NETWORKADMIN_ADMIN_TOKEN` ở hai đầu để bảo vệ các lệnh quản trị nhạy cảm ở tầng ứng dụng; token này không được mã hóa khi dùng chế độ TCP demo.
 ### Kiểm thử Remote Administration an toàn
 
 Server console hỗ trợ lệnh chỉ đọc `remote-info <clientId>`. Lệnh này dùng
