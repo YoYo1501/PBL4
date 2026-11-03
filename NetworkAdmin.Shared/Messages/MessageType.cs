@@ -17,5 +17,9 @@ public enum MessageType
     ScreenShareConsent = 13,
     ScreenShareStop = 14,
     ScreenChannelReady = 15,
-    ScreenShareStart = 16
+    ScreenShareStart = 16,
+    ControlRequest = 17,
+    ControlConsent = 18,
+    ControlStop = 19,
+    ControlInputEvent = 20
 }

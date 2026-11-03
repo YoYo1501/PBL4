@@ -16,12 +16,13 @@ internal sealed class ClientRuntime
     private readonly INetworkScannerService _scannerService;
     private readonly ISystemMonitorService _monitorService;
     private readonly IScreenShareConsent? _screenShareUi;
+    private readonly IRemoteInputService? _remoteInputService;
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _runTask;
 
     public ClientRuntime(ClientOptions options, INetworkInfoService networkInfoService,
         IPingService pingService, INetworkScannerService scannerService, ISystemMonitorService monitorService,
-        IScreenShareConsent? screenShareUi = null)
+        IScreenShareConsent? screenShareUi = null, IRemoteInputService? remoteInputService = null)
     {
         _options = options;
         _networkInfoService = networkInfoService;
@@ -29,6 +30,7 @@ internal sealed class ClientRuntime
         _scannerService = scannerService;
         _monitorService = monitorService;
         _screenShareUi = screenShareUi;
+        _remoteInputService = remoteInputService;
     }
 
     public void Start() => _runTask ??= Task.Run(RunAsync);
@@ -45,7 +47,9 @@ internal sealed class ClientRuntime
         while (!_shutdown.IsCancellationRequested)
         {
             // Each attempt owns its stream and cancellation; old results cannot reach a new session.
-            await using var connection = new ServerConnection();
+            await using var connection = string.IsNullOrWhiteSpace(_options.TlsServerSha256)
+                ? new ServerConnection() // In-memory loopback fixtures only; ClientOptions.Load requires TLS pinning.
+                : new ServerConnection(_options.TlsServerSha256);
             using var session = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             ClientCommandHandler? handler = null;
             Task reader = Task.CompletedTask, telemetry = Task.CompletedTask, networkInfo = Task.CompletedTask;
@@ -59,7 +63,7 @@ internal sealed class ClientRuntime
                 await networkInfoService.SendSnapshotAsync(session.Token).ConfigureAwait(false);
                 var screenShareService = _screenShareUi is null
                     ? null
-                    : new ClientScreenShareService(_options, connection, _screenShareUi);
+                    : new ClientScreenShareService(_options, connection, _screenShareUi, _remoteInputService);
                 handler = new ClientCommandHandler(_pingService, connection, _options.AdminToken, screenShareService);
                 handler.SetScanner(_scannerService);
                 reader = connection.RunReadLoopAsync(handler.HandleAsync, session.Token);

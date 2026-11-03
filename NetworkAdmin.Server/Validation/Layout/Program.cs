@@ -163,8 +163,13 @@ internal static class LayoutValidation
 
     private sealed class LayoutViewerSession : IScreenViewerSession
     {
+        public bool IsControlActive => false;
         public Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken) =>
             Task.FromResult<(long Sequence, byte[] Jpeg)?>(null);
+        public Task<bool> RequestControlAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task SendInputEventAsync(RemoteInputEventKind kind, int x, int y, RemoteMouseButton button,
+            int wheelDelta, int virtualKeyCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopControlAsync(string reason = "Server stopped control.") => Task.CompletedTask;
         public Task StopAsync(string reason = "Viewer closed.") => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

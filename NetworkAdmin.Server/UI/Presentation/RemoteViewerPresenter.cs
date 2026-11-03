@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Server.Application.Interfaces;
 
 namespace NetworkAdmin.Server.Presentation;
@@ -14,6 +15,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     private readonly Func<CancellationToken, Action, Task<IScreenViewerSession>>? _connect;
     private IScreenViewerSession? _session;
     private readonly CancellationTokenSource _stop = new();
+    private readonly SemaphoreSlim _inputLock = new(1, 1);
     private Task? _runTask;
     private int _started;
     private int _stopped;
@@ -21,6 +23,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     public event Action<RemoteViewerState, string?>? StateChanged;
     public event Action<RemoteViewerFrame>? FrameReceived;
     public RemoteViewerState State { get; private set; } = RemoteViewerState.Waiting;
+    public bool IsControlActive => _session?.IsControlActive == true;
 
     public RemoteViewerPresenter(IScreenViewerSession session) => _session = session;
 
@@ -31,6 +34,24 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
         if (Interlocked.Exchange(ref _started, 1) != 0) return;
         _runTask = RunAsync(_stop.Token);
     }
+
+    public Task<bool> RequestControlAsync(CancellationToken cancellationToken) =>
+        _session?.RequestControlAsync(cancellationToken) ?? Task.FromResult(false);
+
+    public async Task SendInputEventAsync(RemoteInputEventKind kind, int x, int y, RemoteMouseButton button,
+        int wheelDelta, int virtualKeyCode)
+    {
+        await _inputLock.WaitAsync(_stop.Token).ConfigureAwait(false);
+        try
+        {
+            if (_session?.IsControlActive == true)
+                await _session.SendInputEventAsync(kind, x, y, button, wheelDelta, virtualKeyCode, _stop.Token).ConfigureAwait(false);
+        }
+        finally { _inputLock.Release(); }
+    }
+
+    public Task StopControlAsync(string reason = "Server stopped remote control.") =>
+        _session?.StopControlAsync(reason) ?? Task.CompletedTask;
 
     private async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -147,6 +168,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     {
         await StopAsync().ConfigureAwait(false);
         _stop.Dispose();
+        _inputLock.Dispose();
         if (_session is not null) await _session.DisposeAsync().ConfigureAwait(false);
     }
 

@@ -2,6 +2,9 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Server.Application.Interfaces;
@@ -38,6 +41,61 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     }
 
     public bool HasSession(string clientId) => _clientSlots.ContainsKey(clientId);
+
+    internal async Task StopControlAsync(PendingScreenShare pending, string reason)
+    {
+        var controlRequestId = pending.ControlRequestId;
+        if (controlRequestId is null) return;
+        pending.EndControl(controlRequestId);
+        if (_clients.TryGet(pending.Client.SessionId, out var current) && ReferenceEquals(current, pending.Client))
+        {
+            try { await _clients.SendAsync(pending.Client.SessionId, MessageType.ControlStop, controlRequestId,
+                new RemoteControlStopMessage { ClientId = pending.Client.ClientId, SessionId = pending.Client.SessionId,
+                    ScreenRequestId = pending.RequestId, Reason = reason }, CancellationToken.None).ConfigureAwait(false); }
+            catch { }
+        }
+    }
+
+    public async Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token)
+    {
+        if (_options.TlsCertificate is null)
+            throw new InvalidOperationException("Remote control requires an authenticated TLS Server certificate.");
+        if (!_clientSlots.TryGetValue(clientId, out var pending) || pending.Client.SessionId != sessionId ||
+            pending.RequestId != screenRequestId || pending.IsStopped || !pending.Stream.Task.IsCompletedSuccessfully)
+            throw new InvalidOperationException("The matching screen session is not active.");
+        var controlRequestId = Guid.NewGuid().ToString("N");
+        if (!pending.TryBeginControl(controlRequestId)) throw new InvalidOperationException("A control request is already pending or active.");
+        try
+        {
+            await _clients.SendAsync(sessionId, MessageType.ControlRequest, controlRequestId,
+                new RemoteControlRequestMessage { ClientId = clientId, SessionId = sessionId, ScreenRequestId = screenRequestId }, token).ConfigureAwait(false);
+            return await pending.ControlConsent.Task.WaitAsync(TimeSpan.FromSeconds(60), token).ConfigureAwait(false);
+        }
+        catch
+        {
+            await StopControlAsync(pending, "Control request was canceled or timed out.").ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    internal Task SendInputEventAsync(PendingScreenShare pending, RemoteInputEventKind kind, int x, int y,
+        RemoteMouseButton button, int wheelDelta, int virtualKeyCode, CancellationToken token)
+    {
+        if (_options.TlsCertificate is null)
+            throw new InvalidOperationException("Remote input is disabled because this Server has no TLS certificate.");
+        var controlRequestId = pending.ControlRequestId;
+        var input = new RemoteInputEventMessage
+        {
+            ClientId = pending.Client.ClientId, SessionId = pending.Client.SessionId,
+            ScreenRequestId = pending.RequestId, ControlRequestId = controlRequestId ?? string.Empty,
+            Kind = kind, X = x, Y = y, Button = button, WheelDelta = wheelDelta, VirtualKeyCode = virtualKeyCode
+        };
+        if (!pending.IsControlActive || controlRequestId is null || pending.IsStopped ||
+            !_clients.TryGet(pending.Client.SessionId, out var current) || !ReferenceEquals(current, pending.Client) ||
+            !RemoteInputEventPolicy.IsValid(input, pending.Client.ClientId, pending.Client.SessionId, pending.RequestId, controlRequestId))
+            throw new InvalidOperationException("Control is not active for this Client session or the input event is invalid.");
+        return _clients.SendAsync(pending.Client.SessionId, MessageType.ControlInputEvent, controlRequestId, input, token);
+    }
 
     public async Task<ScreenViewerSession> RequestAsync(string clientId, string sessionId, CancellationToken token,
         Action? onConnecting = null)
@@ -106,6 +164,28 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
                 !_requests.TryGetValue(envelope.RequestId, out var pending) ||
                 !ReferenceEquals(pending.Client, session)) return;
             await StopPendingAsync(pending, "Client stopped sharing.", notifyClient: false).ConfigureAwait(false);
+            return;
+        }
+
+        if (envelope.Type == MessageType.ControlConsent)
+        {
+            var consent = JsonLineProtocol.GetPayload<RemoteControlConsentMessage>(envelope);
+            if (consent is null || !_requests.TryGetValue(consent.ScreenRequestId, out var pending) ||
+                !ReferenceEquals(pending.Client, session) || consent.ClientId != session.ClientId ||
+                consent.SessionId != session.SessionId || pending.ControlRequestId != envelope.RequestId)
+                return;
+            pending.SetControlConsent(envelope.RequestId, consent.Accepted);
+            return;
+        }
+
+        if (envelope.Type == MessageType.ControlStop)
+        {
+            var stop = JsonLineProtocol.GetPayload<RemoteControlStopMessage>(envelope);
+            if (stop is null || !_requests.TryGetValue(stop.ScreenRequestId, out var pending) ||
+                !ReferenceEquals(pending.Client, session) || stop.ClientId != session.ClientId ||
+                stop.SessionId != session.SessionId || pending.ControlRequestId != envelope.RequestId)
+                return;
+            pending.EndControl(envelope.RequestId);
         }
     }
 
@@ -124,6 +204,15 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     private async Task StopPendingAsync(PendingScreenShare pending, string reason, bool notifyClient)
     {
         if (!pending.TryStop()) return;
+        if (pending.ControlRequestId is { } controlRequestId && notifyClient &&
+            _clients.TryGet(pending.Client.SessionId, out var controlClient) && ReferenceEquals(controlClient, pending.Client))
+        {
+            try { await _clients.SendAsync(pending.Client.SessionId, MessageType.ControlStop, controlRequestId,
+                new RemoteControlStopMessage { ClientId = pending.Client.ClientId, SessionId = pending.Client.SessionId,
+                    ScreenRequestId = pending.RequestId, Reason = reason }, CancellationToken.None).ConfigureAwait(false); }
+            catch { }
+        }
+        pending.EndControl(pending.ControlRequestId);
         _clientSlots.TryRemove(new KeyValuePair<string, PendingScreenShare>(pending.Client.ClientId, pending));
         _requests.TryRemove(new KeyValuePair<string, PendingScreenShare>(pending.RequestId, pending));
         pending.Consent.TrySetResult(false);
@@ -170,10 +259,20 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
         try
         {
             using (client)
-            await using (var network = client.GetStream())
+            await using (var rawNetwork = client.GetStream())
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(10));
+                using var tlsNetwork = _options.TlsCertificate is null ? null : new SslStream(rawNetwork, leaveInnerStreamOpen: true);
+                if (tlsNetwork is not null)
+                    await tlsNetwork.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = _options.TlsCertificate,
+                        ClientCertificateRequired = false,
+                        EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                        CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+                    }, timeout.Token).ConfigureAwait(false);
+                Stream network = (Stream?)tlsNetwork ?? rawNetwork;
                 var hello = await JsonLineProtocol.ReceiveAsync(network, MaxHandshakeBytes, timeout.Token).ConfigureAwait(false);
                 if (hello?.Type != MessageType.Hello || !_requests.TryGetValue(hello.RequestId, out var pending) ||
                     !pending.Consent.Task.IsCompletedSuccessfully || !pending.Consent.Task.Result)
@@ -249,12 +348,45 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
         public string Capability { get; set; } = string.Empty;
         public string RequestId { get; } = Guid.NewGuid().ToString("N");
         public TaskCompletionSource<bool> Consent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<NetworkStream> Stream { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<Stream> Stream { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource StreamClosed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private NetworkStream? _activeStream;
+        public TaskCompletionSource<bool> ControlConsent { get; private set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string? ControlRequestId { get; private set; }
+        public bool IsControlActive { get; private set; }
+        public bool IsStopped => Volatile.Read(ref _stopped) != 0;
+        private Stream? _activeStream;
         private int _stopped;
+        public bool TryBeginControl(string requestId)
+        {
+            lock (this)
+            {
+                if (_stopped != 0 || ControlRequestId is not null) return false;
+                ControlRequestId = requestId;
+                ControlConsent = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                return true;
+            }
+        }
+        public void EndControl(string? requestId)
+        {
+            lock (this)
+            {
+                if (requestId is null || ControlRequestId != requestId) return;
+                ControlConsent.TrySetResult(false);
+                IsControlActive = false;
+                ControlRequestId = null;
+            }
+        }
+        public void SetControlConsent(string requestId, bool accepted)
+        {
+            lock (this)
+            {
+                if (ControlRequestId != requestId) return;
+                IsControlActive = accepted;
+                ControlConsent.TrySetResult(accepted);
+            }
+        }
         public bool TryStop() => Interlocked.Exchange(ref _stopped, 1) == 0;
-        public void SetActiveStream(NetworkStream stream) => _activeStream = stream;
+        public void SetActiveStream(Stream stream) => _activeStream = stream;
         public void DisposeStream()
         {
             try { _activeStream?.Dispose(); } catch { }
@@ -264,8 +396,9 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
 }
 
 internal sealed class ScreenViewerSession(ScreenStreamingService service,
-    ScreenStreamingService.PendingScreenShare pending, NetworkStream stream) : IScreenViewerSession
+    ScreenStreamingService.PendingScreenShare pending, Stream stream) : IScreenViewerSession
 {
+    public bool IsControlActive => pending.IsControlActive;
     private int _stopped;
 
     public async Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken)
@@ -280,6 +413,14 @@ internal sealed class ScreenViewerSession(ScreenStreamingService service,
 
     public Task StopAsync(string reason = "Viewer closed.") =>
         Interlocked.Exchange(ref _stopped, 1) == 0 ? service.StopAsync(pending, reason) : Task.CompletedTask;
+
+    public Task<bool> RequestControlAsync(CancellationToken cancellationToken) =>
+        service.RequestControlAsync(pending.Client.ClientId, pending.Client.SessionId, pending.RequestId, cancellationToken);
+    public Task SendInputEventAsync(RemoteInputEventKind kind, int x, int y, RemoteMouseButton button,
+        int wheelDelta, int virtualKeyCode, CancellationToken cancellationToken) =>
+        service.SendInputEventAsync(pending, kind, x, y, button, wheelDelta, virtualKeyCode, cancellationToken);
+    public Task StopControlAsync(string reason = "Server stopped control.") =>
+        service.StopControlAsync(pending, reason);
 
     public async ValueTask DisposeAsync()
     {

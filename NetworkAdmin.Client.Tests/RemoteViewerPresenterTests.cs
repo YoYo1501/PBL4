@@ -99,6 +99,7 @@ public sealed class RemoteViewerPresenterTests
         private int _index;
         private int _stopCalls;
         public int StopCalls => Volatile.Read(ref _stopCalls);
+        public bool IsControlActive => false;
 
         public Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken)
         {
@@ -107,6 +108,12 @@ public sealed class RemoteViewerPresenterTests
             var frame = frames[_index++];
             return Task.FromResult<(long Sequence, byte[] Jpeg)?>(frame);
         }
+
+        public Task<bool> RequestControlAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task SendInputEventAsync(NetworkAdmin.Shared.Messages.RemoteInputEventKind kind, int x, int y,
+            NetworkAdmin.Shared.Messages.RemoteMouseButton button, int wheelDelta, int virtualKeyCode,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopControlAsync(string reason = "Server stopped control.") => Task.CompletedTask;
 
         public Task StopAsync(string reason = "Viewer closed.")
         {

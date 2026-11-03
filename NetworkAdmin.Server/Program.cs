@@ -1,4 +1,5 @@
 using NetworkAdmin.Shared.Messages;
+using System.Security.Cryptography;
 
 namespace NetworkAdmin.Server;
 
@@ -32,6 +33,7 @@ internal static class Program
     private static async Task RunConsoleAsync(string[] args)
     {
         var options = ServerOptions.Load(args);
+        Console.WriteLine($"TLS server SHA-256 fingerprint: {options.TlsCertificate!.GetCertHashString(HashAlgorithmName.SHA256)}");
         using var cancellation = new CancellationTokenSource();
 
         Console.CancelKeyPress += (_, eventArgs) =>

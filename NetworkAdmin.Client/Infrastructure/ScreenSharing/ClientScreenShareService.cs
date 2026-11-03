@@ -1,5 +1,7 @@
 using NetworkAdmin.Client.Infrastructure.Configuration;
 using System.Net.Sockets;
+using System.IO;
+using System.Diagnostics;
 using NetworkAdmin.Client.Application.Interfaces;
 using NetworkAdmin.Client.Infrastructure.Networking;
 using NetworkAdmin.Shared.Messages;
@@ -13,17 +15,25 @@ internal sealed class ClientScreenShareService
     private readonly ServerConnection _control;
     private readonly IScreenShareConsent _ui;
     private readonly ScreenCaptureService _capture;
+    private readonly IRemoteInputService _remoteInput;
     private readonly object _sync = new();
     private ApprovedRequest? _approved;
     private CancellationTokenSource? _activeShare;
     private CancellationTokenSource? _consentRequest;
+    private CancellationTokenSource? _controlConsentRequest;
+    private string? _activeScreenRequestId;
+    private string? _controlRequestId;
+    private bool _controlActive;
+    private long _lastMouseMoveTimestamp;
 
-    public ClientScreenShareService(ClientOptions options, ServerConnection control, IScreenShareConsent ui)
+    public ClientScreenShareService(ClientOptions options, ServerConnection control, IScreenShareConsent ui,
+        IRemoteInputService? remoteInput = null)
     {
         _options = options;
         _control = control;
         _ui = ui;
         _capture = new ScreenCaptureService(options.ScreenMaxWidth, options.ScreenMaxHeight, options.ScreenJpegQuality);
+        _remoteInput = remoteInput ?? new WindowsRemoteInputService();
     }
 
     public async Task HandleRequestAsync(MessageEnvelope envelope, CancellationToken sessionToken)
@@ -104,6 +114,7 @@ internal sealed class ClientScreenShareService
             share = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
             _activeShare = share;
             _approved = null;
+            _activeScreenRequestId = envelope.RequestId;
         }
 
         try
@@ -116,10 +127,15 @@ internal sealed class ClientScreenShareService
         finally
         {
             _ui.SetSharing(false, static () => { });
+            _ui.SetControlState(false, static () => { });
             lock (_sync)
             {
                 if (ReferenceEquals(_activeShare, share)) _activeShare = null;
+                if (_activeScreenRequestId == envelope.RequestId) _activeScreenRequestId = null;
+                _controlRequestId = null;
+                _controlActive = false;
             }
+            _remoteInput.ReleaseAll();
             share.Dispose();
             if (!sessionToken.IsCancellationRequested)
             {
@@ -136,12 +152,124 @@ internal sealed class ClientScreenShareService
 
     public void Stop()
     {
+        string? controlRequestId;
+        string? screenRequestId;
         lock (_sync)
         {
             _approved = null;
             _consentRequest?.Cancel();
+            _controlConsentRequest?.Cancel();
             _activeShare?.Cancel();
+            controlRequestId = _controlRequestId;
+            screenRequestId = _activeScreenRequestId;
+            _controlRequestId = null;
+            _activeScreenRequestId = null;
+            _controlActive = false;
         }
+        _remoteInput.ReleaseAll();
+        _ui.SetControlState(false, static () => { });
+        if (controlRequestId is not null && screenRequestId is not null)
+            _ = SendControlStopBestEffortAsync(controlRequestId, screenRequestId, "Screen session ended.");
+    }
+
+    public async Task HandleControlRequestAsync(MessageEnvelope envelope, CancellationToken sessionToken)
+    {
+        var request = JsonLineProtocol.GetPayload<RemoteControlRequestMessage>(envelope);
+        if (string.IsNullOrWhiteSpace(envelope.RequestId) || request is null ||
+            request.ClientId != _control.ClientId || request.SessionId != _control.SessionId)
+            return;
+        lock (_sync)
+        {
+            if (_activeShare is null || _activeShare.IsCancellationRequested ||
+                _activeScreenRequestId != request.ScreenRequestId || _controlRequestId is not null)
+                return;
+            _controlRequestId = envelope.RequestId;
+            _controlConsentRequest = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
+        }
+        CancellationTokenSource consentCancellation;
+        lock (_sync) consentCancellation = _controlConsentRequest!;
+        bool accepted;
+        try { accepted = await _ui.RequestControlConsentAsync(_options.Host, consentCancellation.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) { accepted = false; }
+        lock (_sync)
+        {
+            if (_controlRequestId != envelope.RequestId || _activeScreenRequestId != request.ScreenRequestId)
+                accepted = false;
+            if (!accepted && _controlRequestId == envelope.RequestId) _controlRequestId = null;
+            _controlActive = accepted;
+            if (ReferenceEquals(_controlConsentRequest, consentCancellation)) _controlConsentRequest = null;
+        }
+        consentCancellation.Dispose();
+        await _control.SendAsync(MessageType.ControlConsent, envelope.RequestId,
+            new RemoteControlConsentMessage
+            {
+                ClientId = request.ClientId, SessionId = request.SessionId,
+                ScreenRequestId = request.ScreenRequestId, Accepted = accepted,
+                Message = accepted ? "Client consented; control is simulation-only." : "Client rejected or session ended."
+            }, sessionToken).ConfigureAwait(false);
+        if (accepted) _ui.SetControlState(true, () => _ = StopControlFromClientAsync(envelope.RequestId, request.ScreenRequestId));
+    }
+
+    public void HandleControlStop(MessageEnvelope envelope)
+    {
+        var stop = JsonLineProtocol.GetPayload<RemoteControlStopMessage>(envelope);
+        if (stop is null || stop.ClientId != _control.ClientId || stop.SessionId != _control.SessionId) return;
+        lock (_sync)
+        {
+            if (_controlRequestId != envelope.RequestId || _activeScreenRequestId != stop.ScreenRequestId) return;
+            _controlConsentRequest?.Cancel();
+            _controlRequestId = null;
+            _controlActive = false;
+        }
+        _remoteInput.ReleaseAll();
+        _ui.SetControlState(false, static () => { });
+    }
+
+    public void HandleInputEvent(MessageEnvelope envelope)
+    {
+        if (!_control.IsTlsAuthenticated) return;
+        var input = JsonLineProtocol.GetPayload<RemoteInputEventMessage>(envelope);
+        lock (_sync)
+        {
+            if (!_controlActive || _controlRequestId is null || _activeScreenRequestId is null ||
+                envelope.RequestId != _controlRequestId ||
+                !RemoteInputEventPolicy.IsValid(input, _control.ClientId, _control.SessionId ?? string.Empty,
+                    _activeScreenRequestId, _controlRequestId))
+                return;
+            if (input!.Kind == RemoteInputEventKind.MouseMove)
+            {
+                var now = Stopwatch.GetTimestamp();
+                if (_lastMouseMoveTimestamp != 0 && Stopwatch.GetElapsedTime(_lastMouseMoveTimestamp, now) < TimeSpan.FromMilliseconds(16))
+                    return;
+                _lastMouseMoveTimestamp = now;
+            }
+            try { _remoteInput.Execute(input); }
+            catch (Exception ex) { Console.WriteLine($"Remote input event rejected: {ex.Message}"); }
+        }
+    }
+
+    private async Task StopControlFromClientAsync(string controlRequestId, string screenRequestId)
+    {
+        lock (_sync)
+        {
+            if (_controlRequestId != controlRequestId || _activeScreenRequestId != screenRequestId) return;
+            _controlRequestId = null;
+            _controlActive = false;
+        }
+        _remoteInput.ReleaseAll();
+        _ui.SetControlState(false, static () => { });
+        await SendControlStopBestEffortAsync(controlRequestId, screenRequestId, "Client user stopped remote control.").ConfigureAwait(false);
+    }
+
+    private Task SendControlStopAsync(string controlRequestId, string screenRequestId, string reason) =>
+        _control.SendAsync(MessageType.ControlStop, controlRequestId,
+            new RemoteControlStopMessage { ClientId = _control.ClientId, SessionId = _control.SessionId ?? string.Empty,
+                ScreenRequestId = screenRequestId, Reason = reason }, CancellationToken.None);
+
+    private async Task SendControlStopBestEffortAsync(string controlRequestId, string screenRequestId, string reason)
+    {
+        try { await SendControlStopAsync(controlRequestId, screenRequestId, reason).ConfigureAwait(false); }
+        catch (Exception ex) { Console.WriteLine($"Unable to send ControlStop: {ex.Message}"); }
     }
 
     private static void CancelShare(CancellationTokenSource share)
@@ -156,7 +284,10 @@ internal sealed class ClientScreenShareService
         var cancellationToken = share.Token;
         using var client = new TcpClient();
         await client.ConnectAsync(_options.Host, start.ScreenPort, cancellationToken).ConfigureAwait(false);
-        await using var stream = client.GetStream();
+        await using var rawStream = client.GetStream();
+        using var tlsStream = _control.CreatePinnedTlsStream(rawStream);
+        await _control.AuthenticateScreenTlsAsync(tlsStream, _options.Host, cancellationToken).ConfigureAwait(false);
+        Stream stream = tlsStream;
         await JsonLineProtocol.SendAsync(stream, MessageType.Hello, requestId,
             new ScreenChannelHelloMessage
             {

@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography.X509Certificates;
+using NetworkAdmin.Server.Security;
 
 namespace NetworkAdmin.Server.Configuration;
 
@@ -9,6 +11,7 @@ internal sealed class ServerOptions
     public string AdminToken { get; init; } = string.Empty;
     public int ScreenPort { get; init; } = 5001;
     public TimeSpan ScreenConsentTimeout { get; init; } = TimeSpan.FromSeconds(60);
+    public X509Certificate2? TlsCertificate { get; init; }
 
     public static ServerOptions Load(string[] args)
     {
@@ -47,7 +50,8 @@ internal sealed class ServerOptions
             Host = address,
             Port = port,
             AdminToken = adminToken,
-            ScreenPort = screenPort
+            ScreenPort = screenPort,
+            TlsCertificate = ServerTlsCertificateProvider.LoadOrCreate()
         };
     }
 

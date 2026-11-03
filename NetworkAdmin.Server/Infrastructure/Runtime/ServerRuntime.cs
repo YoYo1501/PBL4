@@ -3,6 +3,7 @@ using NetworkAdmin.Shared.Models;
 using NetworkAdmin.Shared.Policies;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Server.Application.Interfaces;
+using System.Security.Cryptography;
 
 namespace NetworkAdmin.Server.Runtime;
 
@@ -14,6 +15,7 @@ internal sealed class ServerRuntime : IServerRuntime
     private readonly TcpHelloServer _server;
     private readonly ScreenStreamingService _screenStreaming;
     private readonly string _adminToken;
+    private readonly System.Security.Cryptography.X509Certificates.X509Certificate2? _tlsCertificate;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<string, ClientSnapshot> _history = new(StringComparer.OrdinalIgnoreCase);
     private Task? _serverTask;
@@ -25,10 +27,13 @@ internal sealed class ServerRuntime : IServerRuntime
         _screenStreaming = new(options, _clients);
         _server = new(options, _clients, _dispatcher, _screenStreaming);
         _adminToken = options.AdminToken;
-        Endpoint = $"{options.Host}:{options.Port}";
+        _tlsCertificate = options.TlsCertificate;
+        SecurityFingerprint = options.TlsCertificate?.GetCertHashString(HashAlgorithmName.SHA256) ?? "TLS disabled (test configuration)";
+        Endpoint = $"{options.Host}:{options.Port} | TLS SHA256 {SecurityFingerprint}";
     }
 
     public string Endpoint { get; }
+    public string SecurityFingerprint { get; }
     public string Status => _error is not null ? $"Stopped: {_error}" : _server.IsListening ? "Running" : "Stopped";
     public bool IsRunning => _server.IsListening;
 
@@ -58,6 +63,7 @@ internal sealed class ServerRuntime : IServerRuntime
         await _shutdown.CancelAsync();
         if (_serverTask is not null) await _serverTask.ConfigureAwait(false);
         await _screenStreaming.DisposeAsync().ConfigureAwait(false);
+        _tlsCertificate?.Dispose();
     }
 
     public Task<IScreenViewerSession> RequestScreenAsync(string clientId, string sessionId, CancellationToken token,
@@ -69,6 +75,9 @@ internal sealed class ServerRuntime : IServerRuntime
         await _screenStreaming.RequestAsync(clientId, sessionId, token, onConnecting).ConfigureAwait(false);
 
     public bool IsScreenSharing(string clientId) => _screenStreaming.HasSession(clientId);
+
+    public Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token) =>
+        _screenStreaming.RequestControlAsync(clientId, sessionId, screenRequestId, token);
 
     // Called by the UI timer, never by a socket callback. Retain recent disconnected sessions.
     public IReadOnlyList<ClientSnapshot> GetClients()

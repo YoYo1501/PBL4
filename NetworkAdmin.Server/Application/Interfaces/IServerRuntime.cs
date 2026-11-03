@@ -3,6 +3,7 @@ namespace NetworkAdmin.Server.Application.Interfaces;
 public interface IServerRuntime
 {
     string Endpoint { get; }
+    string SecurityFingerprint { get; }
     string Status { get; }
     bool IsRunning { get; }
     void Start();
@@ -10,6 +11,7 @@ public interface IServerRuntime
     Task<IScreenViewerSession> RequestScreenAsync(string clientId, string sessionId, CancellationToken token,
         Action? onConnecting = null);
     bool IsScreenSharing(string clientId);
+    Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token);
     IReadOnlyList<ClientSnapshot> GetClients();
     Task<PingResult> PingAsync(string sessionId, string target, CancellationToken token);
     Task<ScanResultMessage> ScanAsync(string sessionId, string subnet, CancellationToken token,

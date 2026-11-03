@@ -74,7 +74,7 @@ dotnet run --project NetworkAdmin.Client -- --standalone
 
 ### Screen Streaming demo trên LAN tin cậy
 
-Bản demo PBL4 dùng TCP **không mã hóa** cho cả kênh điều khiển (mặc định cổng 5000) và kênh frame riêng (mặc định cổng 5001). Chỉ chạy trong mạng LAN tin cậy, cô lập; không dùng trên Wi-Fi công cộng, mạng không tin cậy hoặc Internet. Lưu lượng, telemetry và capability phiên có thể bị quan sát hoặc giả mạo bởi thiết bị có quyền truy cập cùng mạng. Không có cấu hình TLS certificate, CA thumbprint, certificate pin hoặc Enrollment trong luồng chạy này.
+The Server and screen TCP channels now require TLS 1.2 or newer. Configure each Client with the SHA-256 fingerprint displayed by the Server; see [PHASE4_TLS.md](PHASE4_TLS.md) for LAN setup.
 
 Khởi chạy Server:
 
