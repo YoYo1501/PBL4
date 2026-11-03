@@ -12,10 +12,10 @@ internal sealed class ScreenCaptureService
     private readonly int _maxHeight;
     private readonly long _jpegQuality;
 
-    public ScreenCaptureService(int maxWidth = 1600, int maxHeight = 1000, int jpegQuality = 58)
+    public ScreenCaptureService(int maxWidth = 3840, int maxHeight = 2160, int jpegQuality = 70)
     {
-        _maxWidth = Math.Clamp(maxWidth, 640, 2560);
-        _maxHeight = Math.Clamp(maxHeight, 480, 1440);
+        _maxWidth = Math.Clamp(maxWidth, 640, 3840);
+        _maxHeight = Math.Clamp(maxHeight, 480, 2160);
         _jpegQuality = Math.Clamp(jpegQuality, 30, 85);
     }
 

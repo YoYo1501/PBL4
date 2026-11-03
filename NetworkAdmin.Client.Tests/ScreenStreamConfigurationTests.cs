@@ -11,9 +11,9 @@ public sealed class ScreenStreamConfigurationTests
     {
         var options = ClientOptions.Load(["--tls-sha256", new string('A', 64)]);
         Assert.Equal(8, options.ScreenMaxFps);
-        Assert.Equal(58, options.ScreenJpegQuality);
-        Assert.Equal(1600, options.ScreenMaxWidth);
-        Assert.Equal(1000, options.ScreenMaxHeight);
+        Assert.Equal(70, options.ScreenJpegQuality);
+        Assert.Equal(3840, options.ScreenMaxWidth);
+        Assert.Equal(2160, options.ScreenMaxHeight);
     }
 
     [Fact]
@@ -28,7 +28,7 @@ public sealed class ScreenStreamConfigurationTests
         ]);
         Assert.Equal(20, options.ScreenMaxFps);
         Assert.Equal(85, options.ScreenJpegQuality);
-        Assert.Equal(2560, options.ScreenMaxWidth);
+        Assert.Equal(3840, options.ScreenMaxWidth);
         Assert.Equal(480, options.ScreenMaxHeight);
     }
 

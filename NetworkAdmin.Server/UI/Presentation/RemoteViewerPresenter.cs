@@ -177,8 +177,8 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
 
 internal static class JpegFrameDecoder
 {
-    public const int MaxWidth = 2560;
-    public const int MaxHeight = 1440;
+    public const int MaxWidth = 3840;
+    public const int MaxHeight = 2160;
     public const long MaxPixels = (long)MaxWidth * MaxHeight;
 
     public static Bitmap Decode(byte[] jpeg)
