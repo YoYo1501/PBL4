@@ -2,7 +2,7 @@
   "profiles": {
     "NetworkAdmin.Client": {
       "commandName": "Project",
-      "commandLineArgs": "--host 10.10.59.29 --port 5000 --tls-sha256 D9E300F8941CA28FC0A755977B84D4D543A14F41BD4995A663212B69FBD5970E"
+      "commandLineArgs": "--host 127.0.0.1 --port 5000"
     }
   }
 }
