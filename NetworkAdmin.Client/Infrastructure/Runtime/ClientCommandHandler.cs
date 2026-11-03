@@ -118,6 +118,24 @@ internal sealed class ClientCommandHandler
             return;
         }
 
+        if (envelope.Type == MessageType.ControlRequest && _screenShareService is not null)
+        {
+            TrackTask(Task.Run(() => _screenShareService.HandleControlRequestAsync(envelope, cancellationToken), CancellationToken.None));
+            return;
+        }
+
+        if (envelope.Type == MessageType.ControlStop)
+        {
+            _screenShareService?.HandleControlStop(envelope);
+            return;
+        }
+
+        if (envelope.Type == MessageType.ControlInputEvent)
+        {
+            _screenShareService?.HandleInputEvent(envelope);
+            return;
+        }
+
         if (envelope.Type == MessageType.ScreenShareStop)
         {
             _screenShareService?.Stop();

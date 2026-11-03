@@ -1,6 +1,14 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using NetworkAdmin.Client.Infrastructure.Runtime;
+using NetworkAdmin.Client.Infrastructure.Configuration;
+using NetworkAdmin.Client.Infrastructure.Scanning;
+using NetworkAdmin.Client.Infrastructure.Monitoring;
+using NetworkAdmin.Client.Application.Interfaces;
 using NetworkAdmin.Server;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
@@ -10,6 +18,138 @@ namespace NetworkAdmin.Client.Tests;
 
 public sealed class ScreenStreamingTests
 {
+    [Fact]
+    public async Task Pinned_tls_client_executes_only_consented_session_bound_input_and_releases_on_client_stop()
+    {
+        using var certificate = CreateTlsCertificate();
+        var pin = certificate.GetCertHashString(HashAlgorithmName.SHA256);
+        var port = ReservePort();
+        var options = new TestClientFixture().ServerOptions(IPAddress.Loopback, port, tlsCertificate: certificate);
+        var server = new ServerRuntime(options);
+        server.Start();
+        await Eventually(() => server.IsRunning);
+
+        var consent = new FakeConsentUi();
+        var input = new FakeRemoteInputService();
+        var network = new NetworkInfoService();
+        var ping = new PingService();
+        var client = new ClientRuntime(new ClientOptions
+        {
+            Host = "127.0.0.1", Port = port, TlsServerSha256 = pin,
+            TelemetryInterval = TimeSpan.FromMilliseconds(250), NetworkInfoInterval = TimeSpan.FromSeconds(1)
+        }, network, ping, new NetworkScannerService(ping, network), new SystemMonitorService(), consent, input);
+        client.Start();
+        try
+        {
+            await Eventually(() => server.GetClients().Any(c => c.Connected));
+            var target = server.GetClients().First(c => c.Connected);
+            var screenTask = server.RequestScreenAsync(target.ClientId, target.SessionId, CancellationToken.None);
+            var viewer = await screenTask.WaitAsync(TimeSpan.FromSeconds(10));
+            await using (viewer)
+            {
+                Assert.False(viewer.IsControlActive);
+                Assert.True(await viewer.RequestControlAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)));
+                await Eventually(() => consent.ControlActive);
+                await viewer.SendInputEventAsync(RemoteInputEventKind.MouseClick, 5000, 5000,
+                    RemoteMouseButton.Left, 0, 0, CancellationToken.None);
+                await Eventually(() => input.Events.Count == 1);
+                Assert.Equal(target.ClientId, input.Events.TryPeek(out var evt) ? evt.ClientId : string.Empty);
+                Assert.Equal(target.SessionId, evt!.SessionId);
+                Assert.Equal(RemoteInputEventKind.MouseClick, evt.Kind);
+                await viewer.SendInputEventAsync(RemoteInputEventKind.KeyDown, 0, 0, 0, 0, 0x41, CancellationToken.None);
+                await viewer.SendInputEventAsync(RemoteInputEventKind.KeyUp, 0, 0, 0, 0, 0x41, CancellationToken.None);
+                await Eventually(() => input.Events.Count == 3);
+                Assert.Equal(RemoteInputEventKind.KeyDown, input.Events.ToArray()[1].Kind);
+                Assert.Equal(RemoteInputEventKind.KeyUp, input.Events.ToArray()[2].Kind);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => viewer.SendInputEventAsync(
+                    (RemoteInputEventKind)99, 0, 0, 0, 0, 0, CancellationToken.None));
+
+                consent.StopControlFromClient();
+                await Eventually(() => !viewer.IsControlActive);
+                Assert.True(server.IsScreenSharing(target.ClientId));
+                Assert.True(input.ReleaseCalls > 0);
+            }
+        }
+        finally
+        {
+            await client.StopAsync();
+            await server.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Tls_protects_both_agent_control_and_screen_stream_channels()
+    {
+        using var certificate = CreateTlsCertificate();
+        var pin = certificate.GetCertHashString(HashAlgorithmName.SHA256);
+        var options = new TestClientFixture().ServerOptions(IPAddress.Loopback, ReservePort(), tlsCertificate: certificate);
+        var server = new ServerRuntime(options);
+        server.Start();
+        await Eventually(() => server.IsRunning);
+        await using var agent = await TestAgent.ConnectAsync(options.Port, pin);
+        try
+        {
+            var requestTask = server.RequestScreenAsync(agent.ClientId, agent.SessionId, CancellationToken.None);
+            var request = await agent.ReadAsync();
+            await agent.SendAsync(MessageType.ScreenShareConsent, request.RequestId,
+                new ScreenShareConsentMessage { ClientId = agent.ClientId, SessionId = agent.SessionId, Accepted = true });
+            var startEnvelope = await agent.ReadAsync();
+            var start = JsonLineProtocol.GetPayload<ScreenShareStartMessage>(startEnvelope)!;
+            using var frameClient = new TcpClient();
+            await frameClient.ConnectAsync(IPAddress.Loopback, start.ScreenPort);
+            await using var rawFrameStream = frameClient.GetStream();
+            using var tlsFrameStream = new SslStream(rawFrameStream, leaveInnerStreamOpen: true,
+                (_, remoteCertificate, _, _) => TlsCertificatePin.Matches(remoteCertificate, pin));
+            await tlsFrameStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = "NetworkAdminTool LAN Server",
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13
+            });
+            await JsonLineProtocol.SendAsync(tlsFrameStream, MessageType.Hello, startEnvelope.RequestId,
+                new ScreenChannelHelloMessage { ClientId = agent.ClientId, SessionId = agent.SessionId,
+                    RequestId = startEnvelope.RequestId, Capability = start.Capability });
+            Assert.Equal(MessageType.ScreenChannelReady, (await JsonLineProtocol.ReceiveAsync(tlsFrameStream))?.Type);
+            await using var viewer = await requestTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var jpeg = new byte[] { 0xFF, 0xD8, 7, 8, 0xFF, 0xD9 };
+            await ScreenFrameProtocol.WriteFrameAsync(tlsFrameStream, 1, jpeg);
+            Assert.Equal(jpeg, (await viewer.ReadFrameAsync(CancellationToken.None))?.Jpeg);
+        }
+        finally { await server.StopAsync(); }
+    }
+
+    [Fact]
+    public async Task Remote_control_is_rejected_when_the_server_transport_is_not_tls()
+    {
+        var options = new TestClientFixture().ServerOptions(IPAddress.Loopback, ReservePort());
+        var server = new ServerRuntime(options);
+        server.Start();
+        await Eventually(() => server.IsRunning);
+        await using var agent = await TestAgent.ConnectAsync(options.Port);
+        try
+        {
+            var screenTask = server.RequestScreenAsync(agent.ClientId, agent.SessionId, CancellationToken.None);
+            var screenRequest = await agent.ReadAsync();
+            await agent.SendAsync(MessageType.ScreenShareConsent, screenRequest.RequestId,
+                new ScreenShareConsentMessage { ClientId = agent.ClientId, SessionId = agent.SessionId, Accepted = true });
+            var startEnvelope = await agent.ReadAsync();
+            var start = JsonLineProtocol.GetPayload<ScreenShareStartMessage>(startEnvelope)!;
+            using var frameClient = new TcpClient();
+            await frameClient.ConnectAsync(IPAddress.Loopback, start.ScreenPort);
+            await using var frameStream = frameClient.GetStream();
+            await JsonLineProtocol.SendAsync(frameStream, MessageType.Hello, startEnvelope.RequestId,
+                new ScreenChannelHelloMessage { ClientId = agent.ClientId, SessionId = agent.SessionId,
+                    RequestId = startEnvelope.RequestId, Capability = start.Capability });
+            await JsonLineProtocol.ReceiveAsync(frameStream);
+            await using var viewer = await screenTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.False(viewer.IsControlActive);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => viewer.RequestControlAsync(CancellationToken.None));
+            Assert.False(viewer.IsControlActive);
+        }
+        finally { await server.StopAsync(); }
+    }
+
     [Fact]
     public async Task Accept_creates_capability_channel_streams_frame_and_viewer_close_stops_session()
     {
@@ -188,6 +328,22 @@ public sealed class ScreenStreamingTests
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
+    private static X509Certificate2 CreateTlsCertificate()
+    {
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest("CN=NetworkAdminTool Test Server", rsa,
+            HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var temporary = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+        const string password = "test-only-pfx-password";
+        var pfx = temporary.Export(X509ContentType.Pfx, password);
+        try
+        {
+            return X509CertificateLoader.LoadPkcs12(pfx, password,
+                X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet);
+        }
+        finally { CryptographicOperations.ZeroMemory(pfx); }
+    }
+
     private static async Task Eventually(Func<bool> predicate)
     {
         using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -197,17 +353,28 @@ public sealed class ScreenStreamingTests
     private sealed class TestAgent : IAsyncDisposable
     {
         private readonly TcpClient _client;
-        private readonly NetworkStream _stream;
+        private readonly Stream _stream;
         public string ClientId { get; }
         public string SessionId { get; }
-        private TestAgent(TcpClient client, string clientId, string sessionId, NetworkStream stream)
+        private TestAgent(TcpClient client, string clientId, string sessionId, Stream stream)
         { _client = client; ClientId = clientId; SessionId = sessionId; _stream = stream; }
 
-        public static async Task<TestAgent> ConnectAsync(int port)
+        public static async Task<TestAgent> ConnectAsync(int port, string? serverPin = null)
         {
             var client = new TcpClient();
             await client.ConnectAsync("127.0.0.1", port);
-            var stream = client.GetStream();
+            Stream stream = client.GetStream();
+            if (serverPin is not null)
+            {
+                var tls = new SslStream(stream, leaveInnerStreamOpen: true,
+                    (_, remoteCertificate, _, _) => TlsCertificatePin.Matches(remoteCertificate, serverPin));
+                await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                {
+                    TargetHost = "NetworkAdminTool LAN Server",
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13
+                });
+                stream = tls;
+            }
             const string id = "screen-test-client";
             await JsonLineProtocol.SendAsync(stream, MessageType.Hello, "screen-test-hello",
                 new HelloMessage { ClientId = id, ClientName = "Screen Test Client" });
@@ -217,6 +384,31 @@ public sealed class ScreenStreamingTests
         }
         public Task SendAsync<T>(MessageType type, string requestId, T data) => JsonLineProtocol.SendAsync(_stream, type, requestId, data);
         public async Task<MessageEnvelope> ReadAsync() => await JsonLineProtocol.ReceiveAsync(_stream) ?? throw new IOException("Unexpected EOF.");
-        public ValueTask DisposeAsync() { _client.Dispose(); return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync() { _stream.Dispose(); _client.Dispose(); return ValueTask.CompletedTask; }
+    }
+
+    private sealed class FakeConsentUi : IScreenShareConsent
+    {
+        private Action _stopControl = static () => { };
+        private int _controlActive;
+        public bool ControlActive => Volatile.Read(ref _controlActive) == 1;
+        public Task<bool> RequestConsentAsync(string serverName, CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<bool> RequestControlConsentAsync(string serverName, CancellationToken cancellationToken) => Task.FromResult(true);
+        public void SetSharing(bool active, Action stop) { }
+        public void SetControlState(bool active, Action stop)
+        {
+            Volatile.Write(ref _controlActive, active ? 1 : 0);
+            _stopControl = stop;
+        }
+        public void StopControlFromClient() => _stopControl();
+    }
+
+    private sealed class FakeRemoteInputService : IRemoteInputService
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<RemoteInputEventMessage> Events { get; } = new();
+        private int _releaseCalls;
+        public int ReleaseCalls => Volatile.Read(ref _releaseCalls);
+        public bool Execute(RemoteInputEventMessage input) { Events.Enqueue(input); return true; }
+        public void ReleaseAll() => Interlocked.Increment(ref _releaseCalls);
     }
 }

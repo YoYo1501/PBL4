@@ -3,16 +3,19 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Security.Cryptography.X509Certificates;
 using NetworkAdmin.Client;
 using NetworkAdmin.Server;
 
 internal sealed class TestClientFixture
 {
-    public ServerOptions ServerOptions(IPAddress host, int port, string adminToken = "", TimeSpan? screenConsentTimeout = null) => new()
+    public ServerOptions ServerOptions(IPAddress host, int port, string adminToken = "", TimeSpan? screenConsentTimeout = null,
+        X509Certificate2? tlsCertificate = null) => new()
     {
         Host = host, Port = port, ScreenPort = ReservePort(),
         AdminToken = adminToken,
-        ScreenConsentTimeout = screenConsentTimeout ?? TimeSpan.FromSeconds(60)
+        ScreenConsentTimeout = screenConsentTimeout ?? TimeSpan.FromSeconds(60),
+        TlsCertificate = tlsCertificate
     };
 
     public ClientOptions ClientOptions(string host, int port) => new()

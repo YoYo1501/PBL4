@@ -1,6 +1,9 @@
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Models;
@@ -111,11 +114,21 @@ internal sealed class TcpHelloServer
         try
         {
             using (client)
-            await using (var networkStream = client.GetStream())
+            await using (var rawStream = client.GetStream())
             {
                 JsonLineProtocol.EnableKeepAlive(client);
                 using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(serverCancellationToken);
                 helloTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+                using var tlsStream = _options.TlsCertificate is null ? null : new SslStream(rawStream, leaveInnerStreamOpen: true);
+                if (tlsStream is not null)
+                    await tlsStream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = _options.TlsCertificate,
+                        ClientCertificateRequired = false,
+                        EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                        CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+                    }, helloTimeout.Token).ConfigureAwait(false);
+                Stream networkStream = (Stream?)tlsStream ?? rawStream;
                 var envelope = await JsonLineProtocol.ReceiveAsync(networkStream, cancellationToken: helloTimeout.Token)
                     .ConfigureAwait(false);
 
@@ -210,7 +223,8 @@ internal sealed class TcpHelloServer
                         continue;
                     }
 
-                    if (next.Type is MessageType.ScreenShareConsent or MessageType.ScreenShareStop)
+                    if (next.Type is MessageType.ScreenShareConsent or MessageType.ScreenShareStop or
+                        MessageType.ControlConsent or MessageType.ControlStop or MessageType.ControlInputEvent)
                     {
                         if (_screenStreaming is not null)
                             await _screenStreaming.HandleControlMessageAsync(session, next).ConfigureAwait(false);

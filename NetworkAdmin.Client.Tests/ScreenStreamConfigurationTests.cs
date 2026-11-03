@@ -9,7 +9,7 @@ public sealed class ScreenStreamConfigurationTests
     [Fact]
     public void Screen_stream_defaults_are_bounded_for_lan_demo()
     {
-        var options = ClientOptions.Load([]);
+        var options = ClientOptions.Load(["--tls-sha256", new string('A', 64)]);
         Assert.Equal(8, options.ScreenMaxFps);
         Assert.Equal(58, options.ScreenJpegQuality);
         Assert.Equal(1600, options.ScreenMaxWidth);
@@ -20,6 +20,7 @@ public sealed class ScreenStreamConfigurationTests
     public void Screen_stream_command_line_settings_are_clamped_to_safe_ranges()
     {
         var options = ClientOptions.Load([
+            "--tls-sha256", new string('A', 64),
             "--screen-fps", "200",
             "--screen-jpeg-quality", "100",
             "--screen-max-width", "9000",
@@ -29,5 +30,12 @@ public sealed class ScreenStreamConfigurationTests
         Assert.Equal(85, options.ScreenJpegQuality);
         Assert.Equal(2560, options.ScreenMaxWidth);
         Assert.Equal(480, options.ScreenMaxHeight);
+    }
+
+    [Fact]
+    public void Client_requires_a_valid_pinned_server_certificate_fingerprint()
+    {
+        Assert.Throws<InvalidOperationException>(() => ClientOptions.Load([]));
+        Assert.Throws<InvalidOperationException>(() => ClientOptions.Load(["--tls-sha256", "not-a-fingerprint"]));
     }
 }

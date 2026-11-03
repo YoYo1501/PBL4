@@ -1,3 +1,5 @@
+using NetworkAdmin.Shared.Protocol;
+
 namespace NetworkAdmin.Client.Infrastructure.Configuration;
 
 internal sealed class ClientOptions
@@ -7,6 +9,7 @@ internal sealed class ClientOptions
     public TimeSpan TelemetryInterval { get; init; } = TimeSpan.FromSeconds(2);
     public TimeSpan NetworkInfoInterval { get; init; } = TimeSpan.FromSeconds(15);
     public string AdminToken { get; init; } = string.Empty;
+    public string TlsServerSha256 { get; init; } = string.Empty;
     public int ScreenMaxFps { get; init; } = 8;
     public int ScreenJpegQuality { get; init; } = 58;
     public int ScreenMaxWidth { get; init; } = 1600;
@@ -44,6 +47,11 @@ internal sealed class ClientOptions
             ?? Environment.GetEnvironmentVariable("NETWORKADMIN_ADMIN_TOKEN")
             ?? string.Empty;
 
+        var tlsServerSha256 = TlsCertificatePin.Normalize(GetValue(args, "--tls-sha256")
+            ?? Environment.GetEnvironmentVariable("NETWORKADMIN_TLS_SERVER_SHA256"));
+        if (tlsServerSha256 is null)
+            throw new InvalidOperationException("Set --tls-sha256 or NETWORKADMIN_TLS_SERVER_SHA256 to the Server's 64-digit SHA-256 certificate fingerprint.");
+
         var screenMaxFps = GetBoundedInt(args, "--screen-fps", "NETWORKADMIN_SCREEN_FPS", 8, 1, 20);
         var screenJpegQuality = GetBoundedInt(args, "--screen-jpeg-quality", "NETWORKADMIN_SCREEN_JPEG_QUALITY", 58, 30, 85);
         var screenMaxWidth = GetBoundedInt(args, "--screen-max-width", "NETWORKADMIN_SCREEN_MAX_WIDTH", 1600, 640, 2560);
@@ -56,6 +64,7 @@ internal sealed class ClientOptions
             TelemetryInterval = interval,
             NetworkInfoInterval = networkInfoInterval,
             AdminToken = adminToken,
+            TlsServerSha256 = tlsServerSha256,
             ScreenMaxFps = screenMaxFps,
             ScreenJpegQuality = screenJpegQuality,
             ScreenMaxWidth = screenMaxWidth,

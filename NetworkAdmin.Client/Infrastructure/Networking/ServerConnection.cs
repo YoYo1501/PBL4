@@ -1,5 +1,8 @@
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+using System.Net.Security;
 using System.Text;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
@@ -9,15 +12,21 @@ namespace NetworkAdmin.Client.Infrastructure.Networking;
 internal sealed class ServerConnection : IAsyncDisposable
 {
     private TcpClient? _client;
-    private NetworkStream? _stream;
+    private Stream? _stream;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly string? _expectedServerFingerprint;
 
     public string ClientId { get; }
     public string ClientName { get; }
     public string? SessionId { get; private set; }
+    public bool IsTlsAuthenticated => _expectedServerFingerprint is not null && _stream is SslStream;
 
-    public ServerConnection()
+    public ServerConnection() : this(null) { }
+
+    public ServerConnection(string? expectedServerFingerprint)
     {
+        _expectedServerFingerprint = expectedServerFingerprint is null ? null :
+            TlsCertificatePin.Normalize(expectedServerFingerprint) ?? throw new ArgumentException("Server SHA-256 fingerprint must contain 64 hexadecimal digits.", nameof(expectedServerFingerprint));
         ClientId = LoadClientId();
         ClientName = Environment.MachineName;
     }
@@ -27,7 +36,23 @@ internal sealed class ServerConnection : IAsyncDisposable
         _client = new TcpClient();
         JsonLineProtocol.EnableKeepAlive(_client);
         await _client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
-        _stream = _client.GetStream();
+        var networkStream = _client.GetStream();
+        if (_expectedServerFingerprint is null)
+        {
+            _stream = networkStream;
+        }
+        else
+        {
+            var tls = new SslStream(networkStream, leaveInnerStreamOpen: false,
+                (_, certificate, _, _) => TlsCertificatePin.Matches(certificate, _expectedServerFingerprint));
+            await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = host,
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+            }, cancellationToken).ConfigureAwait(false);
+            _stream = tls;
+        }
 
         var requestId = Guid.NewGuid().ToString("N");
         await JsonLineProtocol.SendAsync(
@@ -65,6 +90,22 @@ internal sealed class ServerConnection : IAsyncDisposable
         SessionId = ack.SessionId;
         return ack;
     }
+
+    public SslStream CreatePinnedTlsStream(Stream networkStream)
+    {
+        if (_expectedServerFingerprint is null)
+            throw new InvalidOperationException("A pinned TLS fingerprint is required for the screen channel.");
+        return new SslStream(networkStream, leaveInnerStreamOpen: true,
+            (_, certificate, _, _) => TlsCertificatePin.Matches(certificate, _expectedServerFingerprint));
+    }
+
+    public Task AuthenticateScreenTlsAsync(SslStream stream, string host, CancellationToken cancellationToken) =>
+        stream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        {
+            TargetHost = host,
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+        }, cancellationToken);
 
     public Task SendAsync<TPayload>(MessageType type, TPayload payload, CancellationToken cancellationToken)
     {

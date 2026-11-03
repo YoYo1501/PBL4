@@ -29,7 +29,7 @@ internal sealed class ServerDashboardForm : Form
     private readonly Label _date = DashboardTheme.Label("", 9, color: DashboardTheme.Muted);
     private readonly Label _sidebarStatus = DashboardTheme.Label("Starting", 10, true, DashboardTheme.Green);
     private readonly Label _uptime = DashboardTheme.Label("00:00:00", 11);
-    private readonly Label _settings = DashboardTheme.Label("", 11);
+    private readonly TextBox _settings = new() { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, BackColor = DashboardTheme.Surface, ForeColor = DashboardTheme.Text, Font = new Font("Segoe UI", 11), ScrollBars = ScrollBars.Vertical };
     private readonly MetricCard _managed = new("Managed Clients", DashboardTheme.Blue);
     private readonly MetricCard _online = new("Online Clients", DashboardTheme.Green);
     private readonly MetricCard _hosts = new("Hosts in Last Scan", DashboardTheme.Purple);
@@ -386,7 +386,7 @@ internal sealed class ServerDashboardForm : Form
         _settings.Text = $"Runtime status: {_runtime.Status}\nListening address: {_runtime.Endpoint}\n\n" +
             "Configuration is read at startup. Restart with --host <address> --port <port> to change it.\n" +
             "Use --host 0.0.0.0 to listen on all IPv4 interfaces.\n\n" +
-            "This PBL4 demo uses unencrypted TCP on the control and screen ports (defaults 5000 and 5001). Use only on a trusted, isolated LAN; never expose it to the Internet or an untrusted network.\n\n" +
+            "Control and screen TCP channels require TLS 1.2 or newer; Clients must pin the Server SHA-256 fingerprint shown in Settings/Endpoint. The Server certificate is stored in the current Windows user certificate store.\n\n" +
             "Dashboard refresh: 500 ms\nHistory: last 60 received samples per session, in memory\n" +
             "Stale telemetry threshold: 10 seconds\nRemote scanner: IPv4 unicast /23 through /30 (510 hosts maximum)\n\n" +
             "No connection settings are changed by this page.";
