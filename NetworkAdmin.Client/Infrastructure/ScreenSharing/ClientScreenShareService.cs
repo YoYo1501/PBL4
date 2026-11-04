@@ -303,14 +303,35 @@ internal sealed class ClientScreenShareService
 
         onConnected();
         long sequence = 0;
+        Bitmap? previous = null;
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1d / _options.ScreenMaxFps));
-        do
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var jpeg = await Task.Run(_capture.CaptureJpeg, cancellationToken).ConfigureAwait(false);
-            await ScreenFrameProtocol.WriteFrameAsync(stream, sequence++, jpeg, cancellationToken).ConfigureAwait(false);
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Bitmap? current = null;
+                try
+                {
+                    current = await Task.Run(_capture.CaptureBitmap, cancellationToken).ConfigureAwait(false);
+                    var captured = current;
+                    var packet = await Task.Run(() => _capture.CreatePacket(captured, previous, sequence), cancellationToken)
+                        .ConfigureAwait(false);
+                    if (packet is { } framePacket)
+                    {
+                        await ScreenFrameProtocol.WriteFrameAsync(stream, framePacket, cancellationToken).ConfigureAwait(false);
+                        sequence++;
+                        previous?.Dispose();
+                        previous = current;
+                        current = null;
+                    }
+                }
+                finally { current?.Dispose(); }
+
+                if (!await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false)) break;
+            }
         }
-        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false));
+        finally { previous?.Dispose(); }
     }
 
     private Task SendConsentAsync(string requestId, bool accepted, string message, CancellationToken cancellationToken) =>

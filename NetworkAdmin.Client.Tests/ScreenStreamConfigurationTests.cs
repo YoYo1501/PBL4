@@ -10,7 +10,7 @@ public sealed class ScreenStreamConfigurationTests
     public void Screen_stream_defaults_are_bounded_for_lan_demo()
     {
         var options = ClientOptions.Load(["--tls-sha256", new string('A', 64)]);
-        Assert.Equal(8, options.ScreenMaxFps);
+        Assert.Equal(20, options.ScreenMaxFps);
         Assert.Equal(70, options.ScreenJpegQuality);
         Assert.Equal(3840, options.ScreenMaxWidth);
         Assert.Equal(2160, options.ScreenMaxHeight);

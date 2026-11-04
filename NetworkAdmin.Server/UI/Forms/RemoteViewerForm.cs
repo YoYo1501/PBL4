@@ -58,11 +58,18 @@ internal sealed class RemoteViewerForm : Form
         Font = new Font("Segoe UI", 9F);
         KeyPreview = true;
         BuildLayout();
+        _canvas.Resize += (_, _) =>
+        {
+            if (!_actualSize) ApplyFitBounds();
+        };
         _presenter.StateChanged += OnStateChanged;
         _presenter.FrameReceived += OnFrameReceived;
-        _toolTip.SetToolTip(_resolution, "Decoded frame resolution. Fit mode shows the full screen while preserving its aspect ratio.");
+        _toolTip.SetToolTip(_resolution, "Decoded frame resolution received from the Client.");
         _fitButton.Click += (_, _) => SetFitMode();
         _actualButton.Click += (_, _) => SetActualSizeMode();
+        // Fit mode is the safe default: show the complete remote desktop inside
+        // the viewer even when the server monitor has a different resolution.
+        SetFitMode();
         _fullScreenButton.Click += (_, _) => ToggleFullScreen();
         _stopButton.Click += (_, _) => Close();
         _requestControlButton.Click += async (_, _) => await RequestControlAsync();
@@ -254,8 +261,18 @@ internal sealed class RemoteViewerForm : Form
     {
         _actualSize = false;
         _canvas.AutoScroll = false;
-        _picture.Dock = DockStyle.Fill;
-        _picture.SizeMode = PictureBoxSizeMode.Zoom;
+        _picture.Dock = DockStyle.None;
+        // Match RemoteX: draw the full remote frame across the whole viewer panel.
+        _picture.SizeMode = PictureBoxSizeMode.StretchImage;
+        ApplyFitBounds();
+        UpdateViewModeButtons();
+    }
+
+    private void ApplyFitBounds()
+    {
+        if (_canvas.ClientSize.Width <= 0 || _canvas.ClientSize.Height <= 0) return;
+        _picture.SetBounds(0, 0, _canvas.ClientSize.Width, _canvas.ClientSize.Height);
+        _picture.BringToFront();
     }
 
     private void SetActualSizeMode()
@@ -265,6 +282,18 @@ internal sealed class RemoteViewerForm : Form
         _picture.Dock = DockStyle.None;
         _picture.SizeMode = PictureBoxSizeMode.Normal;
         if (_currentBitmap is not null) ApplyPictureSize(_currentBitmap.Width, _currentBitmap.Height);
+        UpdateViewModeButtons();
+    }
+
+    private void UpdateViewModeButtons()
+    {
+        // The button colors indicate which scaling mode is currently active.
+        var active = Color.FromArgb(8, 79, 179);
+        var inactive = DashboardTheme.Input;
+        _fitButton.BackColor = _actualSize ? inactive : active;
+        _actualButton.BackColor = _actualSize ? active : inactive;
+        _fitButton.AccessibleDescription = _actualSize ? "Switch to fit the complete screen in the viewer" : "Active: complete screen fitted in the viewer";
+        _actualButton.AccessibleDescription = _actualSize ? "Active: show the remote screen at its captured size" : "Switch to actual captured size";
     }
 
     private void ApplyPictureSize(int width, int height)
