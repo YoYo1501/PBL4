@@ -317,7 +317,7 @@ internal sealed class ClientScreenShareService
                     current = await Task.Run(_capture.CaptureBitmap, cancellationToken).ConfigureAwait(false);
                     var captured = current;
                     var forceKeyFrame = lastFullFrameAt == 0 ||
-                        Stopwatch.GetElapsedTime(lastFullFrameAt) >= TimeSpan.FromSeconds(2);
+                        Stopwatch.GetElapsedTime(lastFullFrameAt) >= TimeSpan.FromSeconds(1);
                     var packet = await Task.Run(() => _capture.CreatePacket(captured, previous, sequence, forceKeyFrame), cancellationToken)
                         .ConfigureAwait(false);
                     if (packet is { } framePacket)
