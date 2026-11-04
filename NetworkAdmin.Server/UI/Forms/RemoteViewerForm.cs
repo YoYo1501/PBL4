@@ -48,6 +48,8 @@ internal sealed class RemoteViewerForm : Form
         _presenter = new RemoteViewerPresenter(connect);
         Text = $"Remote Viewer — {clientName}";
         StartPosition = FormStartPosition.CenterParent;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         MinimumSize = new Size(720, 480);
         ClientSize = new Size(1180, 760);
         WindowState = FormWindowState.Maximized;
