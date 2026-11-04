@@ -88,8 +88,8 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
             {
                 var frame = await _session!.ReadScreenFrameAsync(cancellationToken).ConfigureAwait(false);
                 if (frame is not { } packet) break;
-                if (packet.Sequence <= lastSequence)
-                    throw new InvalidDataException("Screen frame sequence is out of order.");
+                if (packet.Sequence != lastSequence + 1)
+                    throw new InvalidDataException($"Screen frame sequence gap: expected {lastSequence + 1}, received {packet.Sequence}.");
 
                 if (packet.IsFullFrame)
                 {
@@ -114,6 +114,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
                             packet.X + patch.Width > composite.Width || packet.Y + patch.Height > composite.Height)
                             throw new InvalidDataException("Screen delta rectangle is outside the current frame.");
                         using var graphics = Graphics.FromImage(composite);
+                        graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
                         graphics.DrawImageUnscaled(patch, packet.X, packet.Y);
                     }
                     finally { patch.Dispose(); }

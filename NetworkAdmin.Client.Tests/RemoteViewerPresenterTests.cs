@@ -1,5 +1,7 @@
 using System.Drawing.Imaging;
 using NetworkAdmin.Server;
+using NetworkAdmin.Shared.Messages;
+using NetworkAdmin.Shared.Protocol;
 using Xunit;
 
 namespace NetworkAdmin.Client.Tests;
@@ -28,6 +30,36 @@ public sealed class RemoteViewerPresenterTests
         using var output = new MemoryStream();
         bitmap.Save(output, ImageFormat.Jpeg);
         Assert.Throws<InvalidDataException>(() => JpegFrameDecoder.Decode(output.ToArray()));
+    }
+
+    [Fact]
+    public async Task Presenter_composes_delta_inside_full_frame_without_moving_other_pixels()
+    {
+        var session = new FakePacketViewerSession([
+            new ScreenFramePacket(0, true, 0, 0, 32, 24, CreateJpeg(Color.Red, 32, 24)),
+            new ScreenFramePacket(1, false, 16, 8, 8, 8, CreateJpeg(Color.Blue, 8, 8))
+        ]);
+        await using var presenter = new RemoteViewerPresenter(session);
+        using var completed = new ManualResetEventSlim();
+        Bitmap? latest = null;
+        presenter.FrameReceived += frame =>
+        {
+            Interlocked.Exchange(ref latest, (Bitmap)frame.Image.Clone())?.Dispose();
+            frame.Image.Dispose();
+            if (frame.Sequence == 1) completed.Set();
+        };
+
+        presenter.Start();
+        Assert.True(completed.Wait(TimeSpan.FromSeconds(10)));
+        using var result = latest;
+        Assert.NotNull(result);
+        var unchanged = result!.GetPixel(4, 4);
+        var patched = result.GetPixel(20, 12);
+        Assert.True(unchanged.R > 180 && unchanged.G < 80 && unchanged.B < 80,
+            $"A delta changed pixels outside its rectangle: {unchanged}.");
+        Assert.True(patched.B > 180 && patched.R < 80 && patched.G < 80,
+            $"The delta was not drawn at its declared coordinates: {patched}.");
+        await presenter.StopAsync();
     }
 
     [Fact]
@@ -92,6 +124,34 @@ public sealed class RemoteViewerPresenterTests
         using var stream = new MemoryStream();
         bitmap.Save(stream, ImageFormat.Jpeg);
         return stream.ToArray();
+    }
+
+    private static byte[] CreateJpeg(Color color, int width, int height)
+    {
+        using var bitmap = new Bitmap(width, height);
+        using (var graphics = Graphics.FromImage(bitmap)) graphics.Clear(color);
+        using var stream = new MemoryStream();
+        bitmap.Save(stream, ImageFormat.Jpeg);
+        return stream.ToArray();
+    }
+
+    private sealed class FakePacketViewerSession(IReadOnlyList<ScreenFramePacket> frames) : IScreenViewerSession
+    {
+        private int _index;
+        public bool IsControlActive => false;
+        public Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<(long Sequence, byte[] Jpeg)?>(null);
+        public Task<ScreenFramePacket?> ReadScreenFrameAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<ScreenFramePacket?>(_index < frames.Count ? frames[_index++] : null);
+        }
+        public Task<bool> RequestControlAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task SendInputEventAsync(RemoteInputEventKind kind, int x, int y, RemoteMouseButton button,
+            int wheelDelta, int virtualKeyCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopControlAsync(string reason = "Server stopped control.") => Task.CompletedTask;
+        public Task StopAsync(string reason = "Viewer closed.") => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class FakeViewerSession(IReadOnlyList<(long Sequence, byte[] Jpeg)> frames) : IScreenViewerSession

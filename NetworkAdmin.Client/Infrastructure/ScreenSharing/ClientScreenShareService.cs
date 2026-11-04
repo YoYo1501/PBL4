@@ -303,6 +303,7 @@ internal sealed class ClientScreenShareService
 
         onConnected();
         long sequence = 0;
+        long lastFullFrameAt = 0;
         Bitmap? previous = null;
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1d / _options.ScreenMaxFps));
         try
@@ -315,11 +316,14 @@ internal sealed class ClientScreenShareService
                 {
                     current = await Task.Run(_capture.CaptureBitmap, cancellationToken).ConfigureAwait(false);
                     var captured = current;
-                    var packet = await Task.Run(() => _capture.CreatePacket(captured, previous, sequence), cancellationToken)
+                    var forceKeyFrame = lastFullFrameAt == 0 ||
+                        Stopwatch.GetElapsedTime(lastFullFrameAt) >= TimeSpan.FromSeconds(2);
+                    var packet = await Task.Run(() => _capture.CreatePacket(captured, previous, sequence, forceKeyFrame), cancellationToken)
                         .ConfigureAwait(false);
                     if (packet is { } framePacket)
                     {
                         await ScreenFrameProtocol.WriteFrameAsync(stream, framePacket, cancellationToken).ConfigureAwait(false);
+                        if (framePacket.IsFullFrame) lastFullFrameAt = Stopwatch.GetTimestamp();
                         sequence++;
                         previous?.Dispose();
                         previous = current;

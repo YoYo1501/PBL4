@@ -51,10 +51,11 @@ internal sealed class ScreenCaptureService
         return (Bitmap)resized.Clone();
     }
 
-    public ScreenFramePacket? CreatePacket(Bitmap current, Bitmap? previous, long sequence)
+    public ScreenFramePacket? CreatePacket(Bitmap current, Bitmap? previous, long sequence, bool forceFullFrame = false)
     {
-        if (previous is null || previous.Size != current.Size)
+        if (forceFullFrame || previous is null || previous.Size != current.Size)
             return new ScreenFramePacket(sequence, true, 0, 0, current.Width, current.Height, EncodeJpeg(current));
+        if (ReferenceEquals(previous, current)) return null;
 
         var changed = FindChangeBounds(previous, current);
         if (changed.IsEmpty) return null;
@@ -71,8 +72,6 @@ internal sealed class ScreenCaptureService
     {
         var rect = new Rectangle(0, 0, current.Width, current.Height);
         var format = PixelFormat.Format24bppRgb;
-        var oldData = previous.LockBits(rect, ImageLockMode.ReadOnly, format);
-        var newData = current.LockBits(rect, ImageLockMode.ReadOnly, format);
         var rowBytes = checked(current.Width * 3);
         var oldRow = new byte[rowBytes];
         var newRow = new byte[rowBytes];
@@ -80,34 +79,37 @@ internal sealed class ScreenCaptureService
         var minY = current.Height;
         var maxX = 0;
         var maxY = 0;
+        var oldData = previous.LockBits(rect, ImageLockMode.ReadOnly, format);
         try
         {
-            for (var blockY = 0; blockY < current.Height; blockY += BlockSize)
+            var newData = current.LockBits(rect, ImageLockMode.ReadOnly, format);
+            try
             {
-                var endY = Math.Min(blockY + BlockSize, current.Height);
-                for (var y = blockY; y < endY; y++)
+                for (var blockY = 0; blockY < current.Height; blockY += BlockSize)
                 {
-                    Marshal.Copy(IntPtr.Add(oldData.Scan0, y * oldData.Stride), oldRow, 0, rowBytes);
-                    Marshal.Copy(IntPtr.Add(newData.Scan0, y * newData.Stride), newRow, 0, rowBytes);
-                    for (var blockX = 0; blockX < current.Width; blockX += BlockSize)
+                    var endY = Math.Min(blockY + BlockSize, current.Height);
+                    for (var y = blockY; y < endY; y++)
                     {
-                        var endX = Math.Min(blockX + BlockSize, current.Width);
-                        var offset = blockX * 3;
-                        if (oldRow.AsSpan(offset, (endX - blockX) * 3).SequenceEqual(newRow.AsSpan(offset, (endX - blockX) * 3)))
-                            continue;
-                        minX = Math.Min(minX, blockX);
-                        minY = Math.Min(minY, blockY);
-                        maxX = Math.Max(maxX, endX);
-                        maxY = Math.Max(maxY, endY);
+                        Marshal.Copy(IntPtr.Add(oldData.Scan0, y * oldData.Stride), oldRow, 0, rowBytes);
+                        Marshal.Copy(IntPtr.Add(newData.Scan0, y * newData.Stride), newRow, 0, rowBytes);
+                        for (var blockX = 0; blockX < current.Width; blockX += BlockSize)
+                        {
+                            var endX = Math.Min(blockX + BlockSize, current.Width);
+                            var offset = blockX * 3;
+                            var length = (endX - blockX) * 3;
+                            if (oldRow.AsSpan(offset, length).SequenceEqual(newRow.AsSpan(offset, length)))
+                                continue;
+                            minX = Math.Min(minX, blockX);
+                            minY = Math.Min(minY, blockY);
+                            maxX = Math.Max(maxX, endX);
+                            maxY = Math.Max(maxY, endY);
+                        }
                     }
                 }
             }
+            finally { current.UnlockBits(newData); }
         }
-        finally
-        {
-            previous.UnlockBits(oldData);
-            current.UnlockBits(newData);
-        }
+        finally { previous.UnlockBits(oldData); }
         return maxX <= minX || maxY <= minY ? Rectangle.Empty : Rectangle.FromLTRB(minX, minY, maxX, maxY);
     }
 
