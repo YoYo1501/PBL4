@@ -79,60 +79,67 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
 
     private async Task RunFramePipelineAsync(CancellationToken cancellationToken)
     {
-        var frames = new LatestFrameQueue<ScreenFrame>();
-        using var pipeline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var receiver = ReceiveFramesAsync(frames, pipeline.Token);
-        var decoder = DecodeFramesAsync(frames, pipeline.Token);
-        try { await Task.WhenAll(receiver, decoder).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch (Exception ex)
-        {
-            SetState(RemoteViewerState.Error, ex.GetBaseException().Message);
-            await pipeline.CancelAsync().ConfigureAwait(false);
-            try { await Task.WhenAll(receiver, decoder).ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-            catch (Exception) { }
-        }
-        finally { frames.Complete(); }
-    }
-
-    private async Task ReceiveFramesAsync(LatestFrameQueue<ScreenFrame> writer, CancellationToken cancellationToken)
-    {
+        var timestamps = new Queue<long>();
+        Bitmap? composite = null;
+        long lastSequence = -1;
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var frame = await _session!.ReadFrameAsync(cancellationToken).ConfigureAwait(false);
-                if (frame is null) break;
-                cancellationToken.ThrowIfCancellationRequested();
-                writer.TryWrite(new ScreenFrame(frame.Value.Sequence, frame.Value.Jpeg));
-            }
-        }
-        finally { writer.Complete(); }
-    }
+                var frame = await _session!.ReadScreenFrameAsync(cancellationToken).ConfigureAwait(false);
+                if (frame is not { } packet) break;
+                if (packet.Sequence <= lastSequence)
+                    throw new InvalidDataException("Screen frame sequence is out of order.");
 
-    private async Task DecodeFramesAsync(LatestFrameQueue<ScreenFrame> reader, CancellationToken cancellationToken)
-    {
-        var timestamps = new Queue<long>();
-        while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            if (!reader.TryRead(out var frame)) continue;
-            var image = await Task.Run(() => JpegFrameDecoder.Decode(frame.Jpeg), cancellationToken).ConfigureAwait(false);
-            var now = Stopwatch.GetTimestamp();
-            timestamps.Enqueue(now);
-            while (timestamps.Count > 1 && Stopwatch.GetElapsedTime(timestamps.Peek(), now) > TimeSpan.FromSeconds(1))
-                timestamps.Dequeue();
-            var fps = timestamps.Count < 2 ? 0 : (timestamps.Count - 1) / Stopwatch.GetElapsedTime(timestamps.Peek(), now).TotalSeconds;
-            var update = new RemoteViewerFrame(image, frame.Sequence, fps, image.Width, image.Height);
-            var handler = FrameReceived;
-            if (handler is null) image.Dispose();
-            else
-            {
-                try { handler(update); }
-                catch { image.Dispose(); throw; }
+                if (packet.IsFullFrame)
+                {
+                    var full = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
+                    if ((packet.Width != 0 && packet.Width != full.Width) ||
+                        (packet.Height != 0 && packet.Height != full.Height))
+                    {
+                        full.Dispose();
+                        throw new InvalidDataException("Full screen frame dimensions do not match its header.");
+                    }
+                    composite?.Dispose();
+                    composite = full;
+                }
+                else
+                {
+                    if (composite is null)
+                        throw new InvalidDataException("Received a screen delta before the first full frame.");
+                    var patch = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        if (patch.Width != packet.Width || patch.Height != packet.Height ||
+                            packet.X + patch.Width > composite.Width || packet.Y + patch.Height > composite.Height)
+                            throw new InvalidDataException("Screen delta rectangle is outside the current frame.");
+                        using var graphics = Graphics.FromImage(composite);
+                        graphics.DrawImageUnscaled(patch, packet.X, packet.Y);
+                    }
+                    finally { patch.Dispose(); }
+                }
+
+                lastSequence = packet.Sequence;
+                var now = Stopwatch.GetTimestamp();
+                timestamps.Enqueue(now);
+                while (timestamps.Count > 1 && Stopwatch.GetElapsedTime(timestamps.Peek(), now) > TimeSpan.FromSeconds(1))
+                    timestamps.Dequeue();
+                var fps = timestamps.Count < 2 ? 0 : (timestamps.Count - 1) / Stopwatch.GetElapsedTime(timestamps.Peek(), now).TotalSeconds;
+                var image = await Task.Run(() => (Bitmap)composite!.Clone(), cancellationToken).ConfigureAwait(false);
+                var update = new RemoteViewerFrame(image, packet.Sequence, fps, composite.Width, composite.Height);
+                var handler = FrameReceived;
+                if (handler is null) image.Dispose();
+                else
+                {
+                    try { handler(update); }
+                    catch { image.Dispose(); throw; }
+                }
+                SetState(RemoteViewerState.Streaming);
             }
-            SetState(RemoteViewerState.Streaming);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex) { SetState(RemoteViewerState.Error, ex.GetBaseException().Message); }
+        finally { composite?.Dispose(); }
     }
 
     private void SetState(RemoteViewerState state, string? detail = null)
@@ -172,7 +179,6 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
         if (_session is not null) await _session.DisposeAsync().ConfigureAwait(false);
     }
 
-    private sealed record ScreenFrame(long Sequence, byte[] Jpeg);
 }
 
 internal static class JpegFrameDecoder

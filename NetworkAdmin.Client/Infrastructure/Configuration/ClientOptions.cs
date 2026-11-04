@@ -10,7 +10,7 @@ internal sealed class ClientOptions
     public TimeSpan NetworkInfoInterval { get; init; } = TimeSpan.FromSeconds(15);
     public string AdminToken { get; init; } = string.Empty;
     public string TlsServerSha256 { get; init; } = string.Empty;
-    public int ScreenMaxFps { get; init; } = 8;
+    public int ScreenMaxFps { get; init; } = 20;
     public int ScreenJpegQuality { get; init; } = 70;
     public int ScreenMaxWidth { get; init; } = 3840;
     public int ScreenMaxHeight { get; init; } = 2160;
@@ -52,7 +52,7 @@ internal sealed class ClientOptions
         if (tlsServerSha256 is null)
             throw new InvalidOperationException("Set --tls-sha256 or NETWORKADMIN_TLS_SERVER_SHA256 to the Server's 64-digit SHA-256 certificate fingerprint.");
 
-        var screenMaxFps = GetBoundedInt(args, "--screen-fps", "NETWORKADMIN_SCREEN_FPS", 8, 1, 20);
+        var screenMaxFps = GetBoundedInt(args, "--screen-fps", "NETWORKADMIN_SCREEN_FPS", 20, 1, 20);
         var screenJpegQuality = GetBoundedInt(args, "--screen-jpeg-quality", "NETWORKADMIN_SCREEN_JPEG_QUALITY", 70, 30, 85);
         var screenMaxWidth = GetBoundedInt(args, "--screen-max-width", "NETWORKADMIN_SCREEN_MAX_WIDTH", 3840, 640, 3840);
         var screenMaxHeight = GetBoundedInt(args, "--screen-max-height", "NETWORKADMIN_SCREEN_MAX_HEIGHT", 2160, 480, 2160);

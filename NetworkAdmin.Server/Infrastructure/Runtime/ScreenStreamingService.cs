@@ -403,6 +403,12 @@ internal sealed class ScreenViewerSession(ScreenStreamingService service,
 
     public async Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken)
     {
+        var frame = await ReadScreenFrameAsync(cancellationToken).ConfigureAwait(false);
+        return frame is { } value ? (value.Sequence, value.Jpeg) : null;
+    }
+
+    public async Task<ScreenFramePacket?> ReadScreenFrameAsync(CancellationToken cancellationToken)
+    {
         try { return await ScreenFrameProtocol.ReadFrameAsync(stream, cancellationToken).ConfigureAwait(false); }
         catch (InvalidDataException) { throw; }
         catch (EndOfStreamException) { throw; }
