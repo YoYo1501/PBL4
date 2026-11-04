@@ -1,5 +1,6 @@
 using System.Drawing.Imaging;
 using System.Drawing.Drawing2D;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using NetworkAdmin.Shared.Protocol;
 
@@ -25,13 +26,12 @@ internal sealed class ScreenCaptureService
         // CaptureJpeg runs on a worker thread. Give that thread the same physical-pixel
         // coordinate space as the interactive desktop before reading bounds/capturing.
         using var dpiContext = DpiAwarenessContext.EnterPerMonitorV2();
-        var bounds = SystemInformation.VirtualScreen;
+        var bounds = GetPhysicalVirtualScreenBounds();
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No active screen is available for capture.");
 
         using var source = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
-        using (var graphics = Graphics.FromImage(source))
-            graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size, CopyPixelOperation.SourceCopy);
+        CapturePhysicalDesktop(source, bounds);
 
         var scale = Math.Min(1d, Math.Min((double)_maxWidth / source.Width, (double)_maxHeight / source.Height));
         if (scale >= 1d) return EncodeJpeg(source);
@@ -49,6 +49,49 @@ internal sealed class ScreenCaptureService
         return EncodeJpeg(resized);
     }
 
+    private static Rectangle GetPhysicalVirtualScreenBounds()
+    {
+        const int SmXVirtualScreen = 76;
+        const int SmYVirtualScreen = 77;
+        const int SmCxVirtualScreen = 78;
+        const int SmCyVirtualScreen = 79;
+
+        return new Rectangle(
+            GetSystemMetrics(SmXVirtualScreen),
+            GetSystemMetrics(SmYVirtualScreen),
+            GetSystemMetrics(SmCxVirtualScreen),
+            GetSystemMetrics(SmCyVirtualScreen));
+    }
+
+    private static void CapturePhysicalDesktop(Bitmap destination, Rectangle bounds)
+    {
+        const uint SrcCopy = 0x00CC0020;
+        const uint CaptureBlt = 0x40000000;
+        var desktopDc = GetDC(IntPtr.Zero);
+        if (desktopDc == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not access the desktop for screen capture.");
+
+        try
+        {
+            using var graphics = Graphics.FromImage(destination);
+            var destinationDc = graphics.GetHdc();
+            try
+            {
+                if (!BitBlt(destinationDc, 0, 0, bounds.Width, bounds.Height,
+                        desktopDc, bounds.X, bounds.Y, SrcCopy | CaptureBlt))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not capture the complete virtual desktop.");
+            }
+            finally
+            {
+                graphics.ReleaseHdc(destinationDc);
+            }
+        }
+        finally
+        {
+            ReleaseDC(IntPtr.Zero, desktopDc);
+        }
+    }
+
     private sealed class DpiAwarenessContext : IDisposable
     {
         private static readonly IntPtr PerMonitorAwareV2 = new(-4);
@@ -60,8 +103,8 @@ internal sealed class ScreenCaptureService
         {
             var previous = SetThreadDpiAwarenessContext(PerMonitorAwareV2);
             if (previous == IntPtr.Zero)
-                throw new InvalidOperationException("Could not enable per-monitor DPI awareness for screen capture.",
-                    Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Could not enable per-monitor DPI awareness for screen capture.");
             return new DpiAwarenessContext(previous);
         }
 
@@ -70,6 +113,20 @@ internal sealed class ScreenCaptureService
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
     }
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetDC(IntPtr window);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int ReleaseDC(IntPtr window, IntPtr deviceContext);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BitBlt(IntPtr destination, int destinationX, int destinationY,
+        int width, int height, IntPtr source, int sourceX, int sourceY, uint rasterOperation);
 
     private byte[] EncodeJpeg(Image image)
     {
