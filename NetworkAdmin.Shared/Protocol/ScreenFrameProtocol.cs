@@ -7,6 +7,11 @@ public readonly record struct ScreenFramePacket(long Sequence, bool IsFullFrame,
 public static class ScreenFrameProtocol
 {
     public const int MaxFrameBytes = 12 * 1024 * 1024;
+    // Per-dimension cap: individual width or height cannot exceed this many pixels.
+    // This is intentionally larger than any single monitor today (8K = 7680px wide).
+    // Composite-level bounds checking (x+w <= frameWidth) is done by RemoteViewerPresenter,
+    // which knows the actual full-frame size — not hardcoded here.
+    public const int MaxScreenDimension = 7680;
     // JPEG length, sequence, full/delta flag, and the frame rectangle.
     public const int HeaderBytes = sizeof(int) + sizeof(long) + 1 + (sizeof(int) * 4);
 
@@ -18,12 +23,15 @@ public static class ScreenFrameProtocol
         CancellationToken cancellationToken = default)
     {
         var jpeg = frame.Jpeg;
+        // Validate basic sanity: JPEG size, sequence counter, and per-dimension max.
+        // Do NOT validate x + width / y + height against hardcoded screen dimensions here —
+        // those absolute-coordinate checks belong at the compositor (RemoteViewerPresenter),
+        // which knows the actual composite frame size. Checking them here with a fixed 3840×2160
+        // limit would reject valid delta packets from any resolution that isn't exactly 4K.
         if (jpeg.Length is <= 0 or > MaxFrameBytes || frame.Sequence < 0 ||
             (frame.IsFullFrame ? (frame.Width < 0 || frame.Height < 0 || (frame.Width == 0) != (frame.Height == 0)) : (frame.Width <= 0 || frame.Height <= 0)) ||
             frame.X < 0 || frame.Y < 0 ||
-            frame.X > 3840 || frame.Y > 2160 || frame.Width > 3840 || frame.Height > 2160 ||
-            (frame.Width > 0 && frame.X + frame.Width > 3840) ||
-            (frame.Height > 0 && frame.Y + frame.Height > 2160) ||
+            frame.Width > MaxScreenDimension || frame.Height > MaxScreenDimension ||
             (frame.IsFullFrame && (frame.X != 0 || frame.Y != 0)))
             throw new InvalidDataException("Invalid screen frame packet.");
 
@@ -54,11 +62,12 @@ public static class ScreenFrameProtocol
         var y = BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(17, 4));
         var width = BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(21, 4));
         var height = BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(25, 4));
+        // Same rationale as WriteFrameAsync: validate per-dimension max only.
+        // Composite bounds (x+width <= frameWidth) are enforced by the compositor (RemoteViewerPresenter).
         if (length <= 0 || length > MaxFrameBytes || sequence < 0 || kind > 1 ||
             x < 0 || y < 0 ||
             (kind == 1 ? (width < 0 || height < 0 || (width == 0) != (height == 0)) : (width <= 0 || height <= 0)) ||
-            x > 3840 || y > 2160 || width > 3840 || height > 2160 ||
-            (width > 0 && x + width > 3840) || (height > 0 && y + height > 2160) ||
+            width > MaxScreenDimension || height > MaxScreenDimension ||
             (kind == 1 && (x != 0 || y != 0)))
             throw new InvalidDataException("Invalid screen frame header.");
 

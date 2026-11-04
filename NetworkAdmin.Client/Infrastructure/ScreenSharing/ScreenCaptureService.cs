@@ -28,7 +28,12 @@ internal sealed class ScreenCaptureService
         // Capture runs on a worker thread. Give that thread the same physical-pixel
         // coordinate space as the interactive desktop before reading bounds/capturing.
         using var dpiContext = DpiAwarenessContext.EnterPerMonitorV2();
-        var bounds = GetPrimaryDisplayBounds();
+        // Use the full virtual screen (union of all monitors) so that the captured
+        // bitmap always covers the entire desktop — not just the primary display.
+        // GetPrimaryDisplayBounds() was previously used here, which caused the server
+        // to see only the top-left portion of the desktop on multi-monitor setups or
+        // when the primary monitor's physical size differed from the virtual-screen origin.
+        var bounds = GetVirtualScreenBounds();
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No active screen is available for capture.");
 
@@ -111,6 +116,24 @@ internal sealed class ScreenCaptureService
         }
         finally { previous.UnlockBits(oldData); }
         return maxX <= minX || maxY <= minY ? Rectangle.Empty : Rectangle.FromLTRB(minX, minY, maxX, maxY);
+    }
+
+    /// <summary>
+    /// Returns the bounding rectangle of the full virtual screen (union of all monitors)
+    /// in physical pixels, as reported by Win32 SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN.
+    /// This replaces the old GetPrimaryDisplayBounds() which only covered the primary monitor
+    /// and caused the server to see a truncated image on multi-monitor or non-standard setups.
+    /// </summary>
+    private static Rectangle GetVirtualScreenBounds()
+    {
+        // GetSystemMetrics with Per-Monitor V2 awareness returns physical-pixel values.
+        var x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        var y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        var width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        var height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (width <= 0 || height <= 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not read the virtual screen dimensions.");
+        return new Rectangle(x, y, width, height);
     }
 
     private static Rectangle GetPrimaryDisplayBounds()
@@ -226,6 +249,15 @@ internal sealed class ScreenCaptureService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool BitBlt(IntPtr destination, int destinationX, int destinationY,
         int width, int height, IntPtr source, int sourceX, int sourceY, uint rasterOperation);
+
+    // GetSystemMetrics indices for the virtual screen (union of all monitors, physical pixels).
+    private const int SM_XVIRTUALSCREEN  = 76;
+    private const int SM_YVIRTUALSCREEN  = 77;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetSystemMetrics(int nIndex);
 
     private byte[] EncodeJpeg(Image image)
     {
