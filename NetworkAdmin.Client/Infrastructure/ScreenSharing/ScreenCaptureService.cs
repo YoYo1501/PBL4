@@ -1,5 +1,6 @@
 using System.Drawing.Imaging;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using NetworkAdmin.Shared.Protocol;
 
 namespace NetworkAdmin.Client.Infrastructure.ScreenSharing;
@@ -21,6 +22,9 @@ internal sealed class ScreenCaptureService
 
     public byte[] CaptureJpeg()
     {
+        // CaptureJpeg runs on a worker thread. Give that thread the same physical-pixel
+        // coordinate space as the interactive desktop before reading bounds/capturing.
+        using var dpiContext = DpiAwarenessContext.EnterPerMonitorV2();
         var bounds = SystemInformation.VirtualScreen;
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No active screen is available for capture.");
@@ -43,6 +47,28 @@ internal sealed class ScreenCaptureService
         }
 
         return EncodeJpeg(resized);
+    }
+
+    private sealed class DpiAwarenessContext : IDisposable
+    {
+        private static readonly IntPtr PerMonitorAwareV2 = new(-4);
+        private readonly IntPtr _previous;
+
+        private DpiAwarenessContext(IntPtr previous) => _previous = previous;
+
+        public static DpiAwarenessContext EnterPerMonitorV2()
+        {
+            var previous = SetThreadDpiAwarenessContext(PerMonitorAwareV2);
+            if (previous == IntPtr.Zero)
+                throw new InvalidOperationException("Could not enable per-monitor DPI awareness for screen capture.",
+                    Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+            return new DpiAwarenessContext(previous);
+        }
+
+        public void Dispose() => SetThreadDpiAwarenessContext(_previous);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
     }
 
     private byte[] EncodeJpeg(Image image)
