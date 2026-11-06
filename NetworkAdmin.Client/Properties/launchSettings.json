@@ -2,11 +2,7 @@
   "profiles": {
     "NetworkAdmin.Client": {
       "commandName": "Project",
-      "environmentVariables": {
-        "NETWORKADMIN_SCREEN_V2": "true",
-        "NETWORKADMIN_SCREEN_PERFORMANCE": "true"
-      },
-      "commandLineArgs": "--host 172.31.99.131 --port 5000 --tls-sha256 E009F249C40A0866F4F46AF68330EC66BDD773D3E0B21474CDA8D45C831D58D9 --admin-token abc123"
+      "commandLineArgs": "--host 127.0.0.1  --port 5000 --tls-sha256 E009F249C40A0866F4F46AF68330EC66BDD773D3E0B21474CDA8D45C831D58D9 --admin-token abc123"
     }
   }
 }

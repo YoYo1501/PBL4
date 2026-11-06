@@ -1,4 +1,3 @@
-using NetworkAdmin.Shared.Protocol;
 
 namespace NetworkAdmin.Client.Infrastructure.Configuration;
 
@@ -14,7 +13,6 @@ internal sealed class ClientOptions
     public int ScreenJpegQuality { get; init; } = 70;
     public int ScreenMaxWidth { get; init; } = 3840;
     public int ScreenMaxHeight { get; init; } = 2160;
-    public bool ScreenV2Enabled => ScreenShareV2Configuration.IsEnabled;
 
     public static ClientOptions Load(string[] args)
     {
@@ -48,15 +46,11 @@ internal sealed class ClientOptions
             ?? Environment.GetEnvironmentVariable("NETWORKADMIN_ADMIN_TOKEN")
             ?? string.Empty;
 
-        var tlsServerSha256 = TlsCertificatePin.Normalize(GetValue(args, "--tls-sha256")
+        var tlsServerSha256 = NetworkAdmin.Shared.Protocol.TlsCertificatePin.Normalize(GetValue(args, "--tls-sha256")
             ?? Environment.GetEnvironmentVariable("NETWORKADMIN_TLS_SERVER_SHA256"));
         if (tlsServerSha256 is null)
             throw new InvalidOperationException("Set --tls-sha256 or NETWORKADMIN_TLS_SERVER_SHA256 to the Server's 64-digit SHA-256 certificate fingerprint.");
 
-        var screenMaxFps = GetBoundedInt(args, "--screen-fps", "NETWORKADMIN_SCREEN_FPS", 20, 1, 20);
-        var screenJpegQuality = GetBoundedInt(args, "--screen-jpeg-quality", "NETWORKADMIN_SCREEN_JPEG_QUALITY", 70, 30, 85);
-        var screenMaxWidth = GetBoundedInt(args, "--screen-max-width", "NETWORKADMIN_SCREEN_MAX_WIDTH", 3840, 640, 3840);
-        var screenMaxHeight = GetBoundedInt(args, "--screen-max-height", "NETWORKADMIN_SCREEN_MAX_HEIGHT", 2160, 480, 2160);
 
         return new ClientOptions
         {
@@ -66,10 +60,10 @@ internal sealed class ClientOptions
             NetworkInfoInterval = networkInfoInterval,
             AdminToken = adminToken,
             TlsServerSha256 = tlsServerSha256,
-            ScreenMaxFps = screenMaxFps,
-            ScreenJpegQuality = screenJpegQuality,
-            ScreenMaxWidth = screenMaxWidth,
-            ScreenMaxHeight = screenMaxHeight
+            ScreenMaxFps = GetBoundedInt(args, "--screen-fps", "NETWORKADMIN_SCREEN_FPS", 20, 1, 20),
+            ScreenJpegQuality = GetBoundedInt(args, "--screen-jpeg-quality", "NETWORKADMIN_SCREEN_JPEG_QUALITY", 70, 30, 85),
+            ScreenMaxWidth = GetBoundedInt(args, "--screen-max-width", "NETWORKADMIN_SCREEN_MAX_WIDTH", 3840, 640, 3840),
+            ScreenMaxHeight = GetBoundedInt(args, "--screen-max-height", "NETWORKADMIN_SCREEN_MAX_HEIGHT", 2160, 480, 2160)
         };
     }
 

@@ -9,10 +9,9 @@ using NetworkAdmin.Client.Infrastructure.Logging;
 using NetworkAdmin.Client.Infrastructure.Monitoring;
 using NetworkAdmin.Client.Infrastructure.Runtime;
 using NetworkAdmin.Client.Infrastructure.Scanning;
-using NetworkAdmin.Client.UI.Services;
 using NetworkAdmin.Client.Application.Presentation;
 using NetworkAdmin.Client.UI.Forms;
-using NetworkAdmin.Shared.Diagnostics;
+using NetworkAdmin.Client.UI.Services;
 
 namespace NetworkAdmin.Client;
 
@@ -22,7 +21,6 @@ internal static class Program
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
-        ScreenSharePerformanceMonitor.Configure(args);
         var standalone = args.Contains("--standalone", StringComparer.OrdinalIgnoreCase);
         ClientOptions options;
         try
@@ -52,13 +50,10 @@ internal static class Program
                     provider.GetRequiredService<INetworkInfoService>()));
                 services.AddSingleton<ISystemMonitorService, SystemMonitorService>();
                 services.AddSingleton<NetworkDashboardState>();
-                services.AddSingleton<ScreenShareUi>();
-                services.AddSingleton<ClientChatUi>();
                 services.AddSingleton<DashboardPresenter>();
                 services.AddTransient<ScannerPresenter>();
                 services.AddSingleton<MainForm>(provider => new MainForm(provider,
-                    provider.GetRequiredService<DashboardPresenter>(), provider.GetRequiredService<ScreenShareUi>(),
-                    provider.GetRequiredService<ClientChatUi>()));
+                    provider.GetRequiredService<DashboardPresenter>()));
                 services.AddTransient<ScannerForm>(provider => new ScannerForm(provider.GetRequiredService<ScannerPresenter>()));
                 services.AddTransient<PingForm>();
                 services.AddTransient<MonitorForm>();
@@ -67,14 +62,16 @@ internal static class Program
                 services.AddTransient<LogsForm>();
                 services.AddTransient<SettingsForm>();
                 services.AddTransient<AboutForm>();
+                services.AddSingleton<IClientChatUi, ClientChatUi>();
+                services.AddSingleton<IScreenShareConsent, ScreenShareConsentUi>();
                 services.AddSingleton<ClientRuntime>(provider => new ClientRuntime(
                     options,
                     provider.GetRequiredService<INetworkInfoService>(),
                     provider.GetRequiredService<IPingService>(),
                     provider.GetRequiredService<INetworkScannerService>(),
                     provider.GetRequiredService<ISystemMonitorService>(),
-                    provider.GetRequiredService<ScreenShareUi>(),
-                    chatUi: provider.GetRequiredService<ClientChatUi>()));
+                    provider.GetRequiredService<IClientChatUi>(),
+                    provider.GetRequiredService<IScreenShareConsent>()));
             })
             .Build();
 
@@ -84,9 +81,6 @@ internal static class Program
         var runtime = host.Services.GetRequiredService<ClientRuntime>();
         if (!standalone)
         {
-            // Start the network reader only after WinForms has created the main
-            // window handle. ScreenShareUi posts consent dialogs through this
-            // handle; starting earlier can lose the first cross-machine request.
             mainForm.Shown += (_, _) => runtime.Start();
         }
         System.Windows.Forms.Application.Run(mainForm);

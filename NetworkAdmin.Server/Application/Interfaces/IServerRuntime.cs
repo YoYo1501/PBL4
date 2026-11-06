@@ -16,7 +16,7 @@ public interface IServerRuntime
         Action? onConnecting = null);
     bool IsScreenSharing(string clientId);
     Task SendChatAsync(string clientId, string sessionId, string content, CancellationToken token);
-    Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token);
+    IRemoteChatSession OpenChatSession(string clientId, string sessionId);
     IReadOnlyList<ClientSnapshot> GetClients();
     Task<PingResult> PingAsync(string sessionId, string target, CancellationToken token);
     Task<ScanResultMessage> ScanAsync(string sessionId, string subnet, CancellationToken token,

@@ -1,116 +1,84 @@
 using NetworkAdmin.Client.Application.Interfaces;
+using NetworkAdmin.Client.UI.Forms;
 using NetworkAdmin.Shared.Messages;
 
 namespace NetworkAdmin.Client.UI.Services;
 
-internal sealed class ClientChatUi : IClientChatUi, IDisposable
+/// <summary>WinForms adapter for the independent Client chat session.</summary>
+internal sealed class ClientChatUi : IClientChatUi
 {
     private readonly object _sync = new();
-    private Form? _owner;
-    private Form? _window;
-    private RichTextBox? _history;
-    private TextBox? _input;
-    private Func<string, CancellationToken, Task>? _send;
-    private bool _connected;
+    private IClientChatSession? _session;
+    private Action<RemoteChatMessage>? _messageHandler;
+    private ClientChatForm? _form;
 
-    public void Bind(Form owner) => _owner = owner;
-
-    public void BindTransport(Func<string, CancellationToken, Task> sendAsync)
+    public void Attach(IClientChatSession session)
     {
-        lock (_sync) _send = sendAsync;
-    }
-
-    public void SetConnectionState(bool connected, string? detail = null)
-    {
-        _connected = connected;
-        if (!connected && detail is not null) RunOnUi(() => AppendSystem(detail));
-    }
-
-    public void ShowMessage(RemoteChatMessage message)
-    {
-        RunOnUi(() =>
+        ClientChatForm? oldForm;
+        lock (_sync)
         {
-            EnsureWindow();
-            AppendLine(message.SenderRole == RemoteChatSenderRole.Admin ? "Admin" : message.SenderId,
-                message.TimestampUtc.ToLocalTime(), message.Content);
-            if (_window is not null && !_window.Visible) _window.Show(_owner);
-            _window?.BringToFront();
-        });
+            if (_session is not null && _messageHandler is not null)
+                _session.MessageReceived -= _messageHandler;
+            oldForm = _form;
+            _form = null;
+            _session = session;
+            _messageHandler = message => OnMessageReceived(session, message);
+            _session.MessageReceived += _messageHandler;
+        }
+        CloseOnUiThread(oldForm);
     }
 
-    public void Dispose()
+    public void Detach(IClientChatSession session)
     {
-        lock (_sync) _send = null;
-        if (_window is not null && !_window.IsDisposed) _window.Dispose();
-        _window = null;
+        ClientChatForm? form;
+        lock (_sync)
+        {
+            if (!ReferenceEquals(_session, session)) return;
+            if (_messageHandler is not null) session.MessageReceived -= _messageHandler;
+            _messageHandler = null;
+            _session = null;
+            form = _form;
+            _form = null;
+        }
+        if (form is null || form.IsDisposed) return;
+        CloseOnUiThread(form);
     }
 
-    private void EnsureWindow()
+    private static void CloseOnUiThread(ClientChatForm? form)
     {
-        if (_window is not null && !_window.IsDisposed) return;
-        _window = new Form
+        if (form is null || form.IsDisposed) return;
+        try
         {
-            Text = "Remote Chat",
-            StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(520, 420),
-            MinimumSize = new Size(420, 300)
-        };
-        _history = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = Color.White, ForeColor = Color.Black };
-        _input = new TextBox { Dock = DockStyle.Fill };
-        var send = new Button { Text = "Send", AutoSize = true, Dock = DockStyle.Right };
-        send.Click += async (_, _) => await SendCurrentAsync();
-        var bottom = new Panel { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(4) };
-        bottom.Controls.Add(_input);
-        bottom.Controls.Add(send);
-        _window.Controls.Add(_history);
-        _window.Controls.Add(bottom);
-        _window.FormClosing += (_, e) =>
-        {
-            e.Cancel = true;
-            _window.Hide();
-        };
-        if (!_connected) AppendSystem("Chat is disconnected; messages are not queued.");
+            if (form.IsHandleCreated && form.InvokeRequired) form.BeginInvoke((Action)form.Close);
+            else form.Close();
+        }
+        catch (InvalidOperationException) { }
     }
 
-    private async Task SendCurrentAsync()
+    private void OnMessageReceived(IClientChatSession session, RemoteChatMessage message)
     {
-        var text = _input?.Text.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(text)) return;
-        Func<string, CancellationToken, Task>? send;
-        lock (_sync) send = _send;
-        if (!_connected || send is null)
+        var owner = System.Windows.Forms.Application.OpenForms.Cast<Form>().FirstOrDefault(form => form.IsHandleCreated && !form.IsDisposed);
+        if (owner is null) return;
+        void ShowMessage()
         {
-            AppendSystem("Chat is disconnected.");
-            return;
+            if (owner.IsDisposed) return;
+            lock (_sync)
+            {
+                if (_form is null || _form.IsDisposed)
+                {
+                if (!ReferenceEquals(_session, session)) return;
+                    _form = new ClientChatForm(session);
+                }
+                if (!_form.Visible) _form.Show(owner);
+                _form.Activate();
+                _form.AppendMessage(message);
+            }
         }
         try
         {
-            await send(text, CancellationToken.None).ConfigureAwait(true);
-            if (_input is not null) _input.Clear();
-            AppendLine("You", DateTime.Now, text);
+            if (owner.InvokeRequired) owner.BeginInvoke((Action)ShowMessage);
+            else ShowMessage();
         }
-        catch (Exception ex) { AppendSystem($"Send failed: {ex.GetBaseException().Message}"); }
-    }
-
-    private void AppendSystem(string text) => AppendLine("System", DateTime.Now, text);
-
-    private void AppendLine(string sender, DateTime timestamp, string content)
-    {
-        if (_history is null) return;
-        _history.AppendText($"[{timestamp:HH:mm:ss}] {sender}: {content}{Environment.NewLine}");
-        _history.SelectionStart = _history.TextLength;
-        _history.ScrollToCaret();
-    }
-
-    private void RunOnUi(Action action)
-    {
-        var owner = _owner;
-        if (owner is null || owner.IsDisposed) return;
-        if (owner.InvokeRequired)
-        {
-            try { owner.BeginInvoke(action); } catch (InvalidOperationException) { }
-            return;
-        }
-        action();
+        catch (InvalidOperationException) { }
     }
 }

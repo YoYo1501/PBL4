@@ -1,4 +1,3 @@
-using NetworkAdmin.Client.UI.Services;
 using System.Drawing.Drawing2D;
 using System.Globalization;
 using Microsoft.Extensions.DependencyInjection;
@@ -9,16 +8,11 @@ namespace NetworkAdmin.Client.UI.Forms
     public class MainForm : Form
     {
         private readonly System.Windows.Forms.Timer _timer;
-        private readonly ClientChatUi _chatUi;
         private Point _dragStart;
         private bool _dragging;
 
-        internal MainForm(IServiceProvider serviceProvider, DashboardPresenter presenter, ScreenShareUi screenShareUi,
-            ClientChatUi chatUi)
+        internal MainForm(IServiceProvider serviceProvider, DashboardPresenter presenter)
         {
-            screenShareUi.Bind(this);
-            _chatUi = chatUi;
-            _chatUi.Bind(this);
             Text = "Network Administration Tool";
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(1620, 968);
@@ -61,7 +55,6 @@ namespace NetworkAdmin.Client.UI.Forms
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             _timer.Stop();
-            _chatUi.Dispose();
             base.OnFormClosed(e);
         }
     }

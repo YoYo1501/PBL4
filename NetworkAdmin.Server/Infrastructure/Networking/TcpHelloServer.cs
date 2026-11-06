@@ -7,8 +7,8 @@ using System.Security.Cryptography.X509Certificates;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Models;
-using NetworkAdmin.Server.Infrastructure.Chat;
 using NetworkAdmin.Server.Infrastructure.Security;
+using NetworkAdmin.Server.Application.Interfaces;
 
 namespace NetworkAdmin.Server.Networking;
 
@@ -18,24 +18,24 @@ internal sealed class TcpHelloServer
     private readonly ClientManager _clientManager;
     private readonly ServerCommandDispatcher _commandDispatcher;
     private readonly ConcurrentDictionary<TcpClient, byte> _activeClients = new();
-    private readonly ScreenStreamingService? _screenStreaming;
-    private readonly ChatService? _chatService;
     private readonly SecurityAlertService? _securityAlertService;
+    private readonly IRemoteChatModule? _chatModule;
+    private readonly IScreenShareServerModule? _screenShareModule;
 
     public TcpHelloServer(
         ServerOptions options,
         ClientManager clientManager,
         ServerCommandDispatcher commandDispatcher,
-        ScreenStreamingService? screenStreaming = null,
-        ChatService? chatService = null,
-        SecurityAlertService? securityAlertService = null)
+        SecurityAlertService? securityAlertService = null,
+        IRemoteChatModule? chatModule = null,
+        IScreenShareServerModule? screenShareModule = null)
     {
         _options = options;
         _clientManager = clientManager;
         _commandDispatcher = commandDispatcher;
-        _screenStreaming = screenStreaming;
-        _chatService = chatService;
         _securityAlertService = securityAlertService;
+        _chatModule = chatModule;
+        _screenShareModule = screenShareModule;
     }
 
     private volatile bool _isListening;
@@ -193,9 +193,6 @@ internal sealed class TcpHelloServer
                 {
                     _commandDispatcher.FailPendingForSession(replacedSession.SessionId,
                         new IOException($"Client session replaced: {replacedSession.SessionId}"));
-                    if (_screenStreaming is not null)
-                        await _screenStreaming.StopForSessionAsync(replacedSession.SessionId, "Client session was replaced.")
-                            .ConfigureAwait(false);
                 }
                 Console.WriteLine("Client connected");
                 Console.WriteLine($"ClientId: {session.ClientId}");
@@ -211,7 +208,7 @@ internal sealed class TcpHelloServer
                         Accepted = true,
                         SessionId = sessionId,
                         Message = "Hello accepted",
-                        Capabilities = [RemoteProtocolCapabilities.RemoteSessionV1, RemoteProtocolCapabilities.RemoteChatV1]
+                        Capabilities = []
                     },
                     serverCancellationToken).ConfigureAwait(false);
 
@@ -258,25 +255,24 @@ internal sealed class TcpHelloServer
                         continue;
                     }
 
-                    if (next.Type is MessageType.ScreenShareConsent or MessageType.ScreenShareStop or
-                        MessageType.ControlConsent or MessageType.ControlStop or MessageType.ControlInputEvent)
+                    if (next.Type == MessageType.SecurityAlert)
                     {
-                        if (_screenStreaming is not null)
-                            await _screenStreaming.HandleControlMessageAsync(session, next).ConfigureAwait(false);
+                        if (_securityAlertService is not null)
+                            await _securityAlertService.HandleClientMessageAsync(session, next, serverCancellationToken).ConfigureAwait(false);
                         continue;
                     }
 
                     if (next.Type == MessageType.RemoteChatMessage)
                     {
-                        if (_chatService is not null)
-                            await _chatService.HandleClientMessageAsync(session, next, serverCancellationToken).ConfigureAwait(false);
+                        if (_chatModule is not null)
+                            await _chatModule.HandleClientMessageAsync(session, next, serverCancellationToken).ConfigureAwait(false);
                         continue;
                     }
 
-                    if (next.Type == MessageType.SecurityAlert)
+                    if (next.Type is MessageType.ScreenShareConsent or MessageType.ScreenShareStop)
                     {
-                        if (_securityAlertService is not null)
-                            await _securityAlertService.HandleClientMessageAsync(session, next, serverCancellationToken).ConfigureAwait(false);
+                        if (_screenShareModule is not null)
+                            await _screenShareModule.HandleMessageAsync(session, next, serverCancellationToken).ConfigureAwait(false);
                         continue;
                     }
 
@@ -307,11 +303,13 @@ internal sealed class TcpHelloServer
         {
             if (!string.IsNullOrWhiteSpace(sessionId))
             {
-                if (_screenStreaming is not null)
-                    await _screenStreaming.StopForSessionAsync(sessionId, "Client disconnected or session ended.", notifyClient: false)
-                        .ConfigureAwait(false);
-                _chatService?.EndSession(sessionId);
                 _securityAlertService?.EndSession(sessionId);
+                _chatModule?.EndSession(sessionId);
+                if (_screenShareModule is not null)
+                {
+                    try { await _screenShareModule.StopForSessionAsync(sessionId, "Client disconnected.", notifyClient: false).ConfigureAwait(false); }
+                    catch (Exception ex) { Console.WriteLine($"Screen session cleanup failed: {ex.Message}"); }
+                }
                 _clientManager.Remove(sessionId);
                 _commandDispatcher.FailPendingForSession(sessionId, new IOException($"Client disconnected: {sessionId}"));
             }

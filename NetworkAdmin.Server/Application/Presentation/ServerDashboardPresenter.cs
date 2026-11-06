@@ -14,10 +14,6 @@ internal sealed class ServerDashboardPresenter
 
     public ServerDashboardPresenter(IServerRuntime runtime) => _runtime = runtime;
 
-    public Task<IScreenViewerSession> RequestScreenAsync(string clientId, string sessionId, CancellationToken token,
-        Action? onConnecting = null) =>
-        _runtime.RequestScreenAsync(clientId, sessionId, token, onConnecting);
-
     public SessionCommandState CommandsFor(string? clientId)
     {
         if (clientId is null) return _emptyCommands;

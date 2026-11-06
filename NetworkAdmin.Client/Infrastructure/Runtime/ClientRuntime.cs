@@ -3,9 +3,9 @@ using NetworkAdmin.Client.Infrastructure.Configuration;
 using NetworkAdmin.Client.Infrastructure.Monitoring;
 using NetworkAdmin.Client.Infrastructure.Networking;
 using NetworkAdmin.Client.Infrastructure.Scanning;
-using NetworkAdmin.Client.Infrastructure.ScreenSharing;
-using NetworkAdmin.Client.Infrastructure.Chat;
 using NetworkAdmin.Client.Application.State;
+using NetworkAdmin.Client.Infrastructure.Chat;
+using NetworkAdmin.Client.Infrastructure.ScreenSharing;
 
 namespace NetworkAdmin.Client.Infrastructure.Runtime;
 
@@ -16,26 +16,33 @@ internal sealed class ClientRuntime
     private readonly IPingService _pingService;
     private readonly INetworkScannerService _scannerService;
     private readonly ISystemMonitorService _monitorService;
-    private readonly IScreenShareConsent? _screenShareUi;
-    private readonly IRemoteInputService? _remoteInputService;
-    private readonly IClientChatUi? _chatUi;
+    private readonly IClientChatUi _chatUi;
+    private readonly IScreenShareConsent _screenConsent;
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _runTask;
 
     public ClientRuntime(ClientOptions options, INetworkInfoService networkInfoService,
         IPingService pingService, INetworkScannerService scannerService, ISystemMonitorService monitorService,
-        IScreenShareConsent? screenShareUi = null, IRemoteInputService? remoteInputService = null,
-        IClientChatUi? chatUi = null)
+        IClientChatUi chatUi, IScreenShareConsent screenConsent)
     {
         _options = options;
         _networkInfoService = networkInfoService;
         _pingService = pingService;
         _scannerService = scannerService;
         _monitorService = monitorService;
-        _screenShareUi = screenShareUi;
-        _remoteInputService = remoteInputService;
         _chatUi = chatUi;
+        _screenConsent = screenConsent;
     }
+
+    public ClientRuntime(ClientOptions options, INetworkInfoService networkInfoService,
+        IPingService pingService, INetworkScannerService scannerService, ISystemMonitorService monitorService,
+        IClientChatUi chatUi)
+        : this(options, networkInfoService, pingService, scannerService, monitorService, chatUi, NullScreenShareConsent.Instance) { }
+
+    public ClientRuntime(ClientOptions options, INetworkInfoService networkInfoService,
+        IPingService pingService, INetworkScannerService scannerService, ISystemMonitorService monitorService)
+        : this(options, networkInfoService, pingService, scannerService, monitorService,
+            NullClientChatUi.Instance, NullScreenShareConsent.Instance) { }
 
     public void Start() => _runTask ??= Task.Run(RunAsync);
 
@@ -56,7 +63,8 @@ internal sealed class ClientRuntime
                 : new ServerConnection(_options.TlsServerSha256);
             using var session = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             ClientCommandHandler? handler = null;
-            ClientChatService? chatService = null;
+            ClientChatSession? chatSession = null;
+            ClientScreenShareModule? screenShareModule = null;
             Task reader = Task.CompletedTask, telemetry = Task.CompletedTask, networkInfo = Task.CompletedTask;
             try
             {
@@ -66,11 +74,10 @@ internal sealed class ClientRuntime
                 retrySeconds = 1;
                 var networkInfoService = new ClientNetworkInfoService(_networkInfoService, connection);
                 await networkInfoService.SendSnapshotAsync(session.Token).ConfigureAwait(false);
-                var screenShareService = _screenShareUi is null
-                    ? null
-                    : new ClientScreenShareService(_options, connection, _screenShareUi, _remoteInputService);
-                chatService = new ClientChatService(connection, _chatUi);
-                handler = new ClientCommandHandler(_pingService, connection, _options.AdminToken, screenShareService, chatService);
+                chatSession = new ClientChatSession(connection);
+                _chatUi.Attach(chatSession);
+                screenShareModule = new ClientScreenShareModule(_options, connection, _screenConsent);
+                handler = new ClientCommandHandler(_pingService, connection, chatSession, screenShareModule, _options.AdminToken);
                 handler.SetScanner(_scannerService);
                 reader = connection.RunReadLoopAsync(handler.HandleAsync, session.Token);
                 telemetry = new ClientTelemetryService(_monitorService, connection, _options.TelemetryInterval)
@@ -87,12 +94,17 @@ internal sealed class ClientRuntime
             finally
             {
                 await session.CancelAsync();
-                if (chatService is not null) await chatService.DisposeAsync().ConfigureAwait(false);
                 await connection.DisconnectAsync().ConfigureAwait(false);
                 await ObserveStoppedTaskAsync(reader).ConfigureAwait(false);
                 await ObserveStoppedTaskAsync(telemetry).ConfigureAwait(false);
                 await ObserveStoppedTaskAsync(networkInfo).ConfigureAwait(false);
                 if (handler is not null) await handler.DrainAsync().ConfigureAwait(false);
+                if (chatSession is not null)
+                {
+                    _chatUi.Detach(chatSession);
+                    await chatSession.DisposeAsync().ConfigureAwait(false);
+                }
+                if (screenShareModule is not null) await screenShareModule.DisposeAsync().ConfigureAwait(false);
             }
             try { await Task.Delay(TimeSpan.FromSeconds(retrySeconds), _shutdown.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
@@ -105,5 +117,19 @@ internal sealed class ClientRuntime
         try { await task.ConfigureAwait(false); }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Console.WriteLine($"Client session cleanup: {ex.Message}"); }
+    }
+
+    private sealed class NullClientChatUi : IClientChatUi
+    {
+        public static NullClientChatUi Instance { get; } = new();
+        public void Attach(IClientChatSession session) { }
+        public void Detach(IClientChatSession session) { }
+    }
+
+    private sealed class NullScreenShareConsent : IScreenShareConsent
+    {
+        public static NullScreenShareConsent Instance { get; } = new();
+        public Task<bool> RequestConsentAsync(string serverName, CancellationToken cancellationToken) => Task.FromResult(false);
+        public void SetSharing(bool active, Action stop) { }
     }
 }

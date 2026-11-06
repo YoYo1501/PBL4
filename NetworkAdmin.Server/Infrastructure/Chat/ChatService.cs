@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using NetworkAdmin.Server.Application.Interfaces;
 using NetworkAdmin.Server.Networking;
@@ -7,7 +9,7 @@ using NetworkAdmin.Shared.Protocol;
 
 namespace NetworkAdmin.Server.Infrastructure.Chat;
 
-internal sealed class ChatService : IAsyncDisposable
+internal sealed class ChatService : IRemoteChatModule
 {
     private readonly ClientManager _clients;
     private readonly string _adminId;
@@ -25,7 +27,7 @@ internal sealed class ChatService : IAsyncDisposable
         _adminToken = adminToken;
     }
 
-    internal IRemoteChatSession CreateSession(string clientId, string sessionId) =>
+    public IRemoteChatSession CreateSession(string clientId, string sessionId) =>
         new ChatSession(this, clientId, sessionId);
 
     public Task HandleClientMessageAsync(ClientSessionInfo session, MessageEnvelope envelope,
@@ -74,12 +76,12 @@ internal sealed class ChatService : IAsyncDisposable
     }
 
     public async Task SendFromAdminAsync(string clientId, string sessionId,
-        RemoteSessionAuthorization authorization, string content, CancellationToken cancellationToken)
+        string authorizationToken, string content, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        var authorizationError = RemoteSessionAuthorizationPolicy.Validate(
-            authorization, _adminToken, RemoteSessionPermission.ViewOnly, DateTime.UtcNow);
-        if (authorizationError is not null) throw new UnauthorizedAccessException(authorizationError);
+        if (string.IsNullOrEmpty(_adminToken) || string.IsNullOrEmpty(authorizationToken) ||
+            !FixedTimeEquals(authorizationToken, _adminToken))
+            throw new UnauthorizedAccessException("Chat authorization token is not valid.");
         if (!_clients.TryGet(sessionId, out var session) || session is null || !session.IsReady ||
             !string.Equals(session.ClientId, clientId, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The Client session is not active.");
@@ -135,6 +137,13 @@ internal sealed class ChatService : IAsyncDisposable
         if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(ChatService));
     }
 
+    private static bool FixedTimeEquals(string left, string right)
+    {
+        var leftBytes = Encoding.UTF8.GetBytes(left);
+        var rightBytes = Encoding.UTF8.GetBytes(right);
+        return leftBytes.Length == rightBytes.Length && CryptographicOperations.FixedTimeEquals(leftBytes, rightBytes);
+    }
+
     private sealed class ChatSession : IRemoteChatSession
     {
         private readonly ChatService _owner;
@@ -153,14 +162,7 @@ internal sealed class ChatService : IAsyncDisposable
         public event Action<RemoteChatMessage>? MessageReceived;
 
         public Task SendAsync(string content, CancellationToken cancellationToken = default) =>
-            _owner.SendFromAdminAsync(_clientId, _sessionId,
-                new RemoteSessionAuthorization
-                {
-                    AdminId = _owner._adminId,
-                    AuthorizationToken = _owner._adminToken,
-                    Permission = RemoteSessionPermission.ViewOnly,
-                    ExpiresAtUtc = DateTime.UtcNow.AddMinutes(1)
-                }, content, cancellationToken);
+            _owner.SendFromAdminAsync(_clientId, _sessionId, _owner._adminToken, content, cancellationToken);
 
         private void OnMessageReceived(RemoteChatMessage message)
         {
