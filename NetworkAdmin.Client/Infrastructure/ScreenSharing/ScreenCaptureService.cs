@@ -34,13 +34,10 @@ internal sealed class ScreenCaptureService
         // Capture runs on a worker thread. Give that thread the same physical-pixel
         // coordinate space as the interactive desktop before reading bounds/capturing.
         using var dpiContext = DpiAwarenessContext.EnterPerMonitorV2();
-        // RemoteX captures the primary display. Use EnumDisplaySettings here rather
-        // than SM_*VIRTUALSCREEN: on high-DPI laptops GetSystemMetrics can expose
-        // logical dimensions (for example 1600x1000 for a 3200x2000 panel), while
-        // BitBlt still reads the physical desktop. That mismatch produces the
-        // characteristic "only the top-left quarter is visible" result remotely.
-        // EnumDisplaySettings returns the active physical mode for the primary display.
-        var bounds = GetPrimaryDisplayBounds();
+        // Mirror RemoteX's Robot + Toolkit screen rectangle using WinForms' monitor
+        // bounds and managed screen-copy API. This avoids mixing logical and physical
+        // coordinates when the Client uses Windows display scaling.
+        var bounds = GetVirtualScreenBounds();
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No active screen is available for capture.");
 
@@ -185,64 +182,24 @@ internal sealed class ScreenCaptureService
     }
 
     /// <summary>
-    /// Returns the bounding rectangle of the full virtual screen (union of all monitors)
-    /// in physical pixels, as reported by Win32 SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN.
-    /// This replaces the old GetPrimaryDisplayBounds() which only covered the primary monitor
-    /// and caused the server to see a truncated image on multi-monitor or non-standard setups.
+    /// Returns the union of the active monitor bounds in the current DPI context.
     /// </summary>
     private static Rectangle GetVirtualScreenBounds()
     {
-        // GetSystemMetrics with Per-Monitor V2 awareness returns physical-pixel values.
-        var x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        var y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        var width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        var height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        if (width <= 0 || height <= 0)
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not read the virtual screen dimensions.");
-        return new Rectangle(x, y, width, height);
-    }
-
-    private static Rectangle GetPrimaryDisplayBounds()
-    {
-        const int CurrentSettings = -1;
-        var mode = new DevMode { dmDeviceName = string.Empty, dmFormName = string.Empty };
-        mode.dmSize = (ushort)Marshal.SizeOf<DevMode>();
-        if (!EnumDisplaySettings(null, CurrentSettings, ref mode) || mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not read the active primary display resolution.");
-
-        // RemoteX captures the primary display. EnumDisplaySettings reports its active
-        // output mode (physical pixels), avoiding DPI-virtualized virtual-screen metrics.
-        return new Rectangle(mode.dmPositionX, mode.dmPositionY,
-            checked((int)mode.dmPelsWidth), checked((int)mode.dmPelsHeight));
+        var screens = System.Windows.Forms.Screen.AllScreens;
+        if (screens.Length == 0)
+            throw new InvalidOperationException("No active screen is available for capture.");
+        var bounds = screens[0].Bounds;
+        for (var i = 1; i < screens.Length; i++)
+            bounds = Rectangle.Union(bounds, screens[i].Bounds);
+        return bounds;
     }
 
     private static void CapturePhysicalDesktop(Bitmap destination, Rectangle bounds)
     {
-        const uint SrcCopy = 0x00CC0020;
-        const uint CaptureBlt = 0x40000000;
-        var desktopDc = GetDC(IntPtr.Zero);
-        if (desktopDc == IntPtr.Zero)
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not access the desktop for screen capture.");
-
-        try
-        {
-            using var graphics = Graphics.FromImage(destination);
-            var destinationDc = graphics.GetHdc();
-            try
-            {
-                if (!BitBlt(destinationDc, 0, 0, bounds.Width, bounds.Height,
-                        desktopDc, bounds.X, bounds.Y, SrcCopy | CaptureBlt))
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not capture the complete virtual desktop.");
-            }
-            finally
-            {
-                graphics.ReleaseHdc(destinationDc);
-            }
-        }
-        finally
-        {
-            ReleaseDC(IntPtr.Zero, desktopDc);
-        }
+        using var graphics = Graphics.FromImage(destination);
+        graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size,
+            CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
     }
 
     private sealed class DpiAwarenessContext : IDisposable
@@ -266,65 +223,6 @@ internal sealed class ScreenCaptureService
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
     }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct DevMode
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
-        public ushort dmSpecVersion;
-        public ushort dmDriverVersion;
-        public ushort dmSize;
-        public ushort dmDriverExtra;
-        public uint dmFields;
-        public int dmPositionX;
-        public int dmPositionY;
-        public uint dmDisplayOrientation;
-        public uint dmDisplayFixedOutput;
-        public short dmColor;
-        public short dmDuplex;
-        public short dmYResolution;
-        public short dmTTOption;
-        public short dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
-        public ushort dmLogPixels;
-        public uint dmBitsPerPel;
-        public uint dmPelsWidth;
-        public uint dmPelsHeight;
-        public uint dmDisplayFlags;
-        public uint dmDisplayFrequency;
-        public uint dmICMMethod;
-        public uint dmICMIntent;
-        public uint dmMediaType;
-        public uint dmDitherType;
-        public uint dmReserved1;
-        public uint dmReserved2;
-        public uint dmPanningWidth;
-        public uint dmPanningHeight;
-    }
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool EnumDisplaySettings(string? deviceName, int modeNumber, ref DevMode devMode);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetDC(IntPtr window);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int ReleaseDC(IntPtr window, IntPtr deviceContext);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool BitBlt(IntPtr destination, int destinationX, int destinationY,
-        int width, int height, IntPtr source, int sourceX, int sourceY, uint rasterOperation);
-
-    // GetSystemMetrics indices for the virtual screen (union of all monitors, physical pixels).
-    private const int SM_XVIRTUALSCREEN  = 76;
-    private const int SM_YVIRTUALSCREEN  = 77;
-    private const int SM_CXVIRTUALSCREEN = 78;
-    private const int SM_CYVIRTUALSCREEN = 79;
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int GetSystemMetrics(int nIndex);
 
     private byte[] EncodeJpeg(Image image)
     {
