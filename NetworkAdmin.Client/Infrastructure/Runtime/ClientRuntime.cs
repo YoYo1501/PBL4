@@ -4,6 +4,7 @@ using NetworkAdmin.Client.Infrastructure.Monitoring;
 using NetworkAdmin.Client.Infrastructure.Networking;
 using NetworkAdmin.Client.Infrastructure.Scanning;
 using NetworkAdmin.Client.Infrastructure.ScreenSharing;
+using NetworkAdmin.Client.Infrastructure.Chat;
 using NetworkAdmin.Client.Application.State;
 
 namespace NetworkAdmin.Client.Infrastructure.Runtime;
@@ -17,12 +18,14 @@ internal sealed class ClientRuntime
     private readonly ISystemMonitorService _monitorService;
     private readonly IScreenShareConsent? _screenShareUi;
     private readonly IRemoteInputService? _remoteInputService;
+    private readonly IClientChatUi? _chatUi;
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _runTask;
 
     public ClientRuntime(ClientOptions options, INetworkInfoService networkInfoService,
         IPingService pingService, INetworkScannerService scannerService, ISystemMonitorService monitorService,
-        IScreenShareConsent? screenShareUi = null, IRemoteInputService? remoteInputService = null)
+        IScreenShareConsent? screenShareUi = null, IRemoteInputService? remoteInputService = null,
+        IClientChatUi? chatUi = null)
     {
         _options = options;
         _networkInfoService = networkInfoService;
@@ -31,6 +34,7 @@ internal sealed class ClientRuntime
         _monitorService = monitorService;
         _screenShareUi = screenShareUi;
         _remoteInputService = remoteInputService;
+        _chatUi = chatUi;
     }
 
     public void Start() => _runTask ??= Task.Run(RunAsync);
@@ -52,6 +56,7 @@ internal sealed class ClientRuntime
                 : new ServerConnection(_options.TlsServerSha256);
             using var session = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             ClientCommandHandler? handler = null;
+            ClientChatService? chatService = null;
             Task reader = Task.CompletedTask, telemetry = Task.CompletedTask, networkInfo = Task.CompletedTask;
             try
             {
@@ -64,7 +69,8 @@ internal sealed class ClientRuntime
                 var screenShareService = _screenShareUi is null
                     ? null
                     : new ClientScreenShareService(_options, connection, _screenShareUi, _remoteInputService);
-                handler = new ClientCommandHandler(_pingService, connection, _options.AdminToken, screenShareService);
+                chatService = new ClientChatService(connection, _chatUi);
+                handler = new ClientCommandHandler(_pingService, connection, _options.AdminToken, screenShareService, chatService);
                 handler.SetScanner(_scannerService);
                 reader = connection.RunReadLoopAsync(handler.HandleAsync, session.Token);
                 telemetry = new ClientTelemetryService(_monitorService, connection, _options.TelemetryInterval)
@@ -81,6 +87,7 @@ internal sealed class ClientRuntime
             finally
             {
                 await session.CancelAsync();
+                if (chatService is not null) await chatService.DisposeAsync().ConfigureAwait(false);
                 await connection.DisconnectAsync().ConfigureAwait(false);
                 await ObserveStoppedTaskAsync(reader).ConfigureAwait(false);
                 await ObserveStoppedTaskAsync(telemetry).ConfigureAwait(false);

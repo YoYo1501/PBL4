@@ -61,6 +61,16 @@ public sealed class ScreenStreamingTests
                 await Eventually(() => input.Events.Count == 3);
                 Assert.Equal(RemoteInputEventKind.KeyDown, input.Events.ToArray()[1].Kind);
                 Assert.Equal(RemoteInputEventKind.KeyUp, input.Events.ToArray()[2].Kind);
+                await viewer.SendInputEventAsync(RemoteInputEventKind.MouseDown, 1000, 1000,
+                    RemoteMouseButton.Left, 0, 0, CancellationToken.None);
+                await viewer.SendInputEventAsync(RemoteInputEventKind.MouseMove, 2000, 2000,
+                    0, 0, 0, CancellationToken.None);
+                await viewer.SendInputEventAsync(RemoteInputEventKind.MouseUp, 2000, 2000,
+                    RemoteMouseButton.Left, 0, 0, CancellationToken.None);
+                await Eventually(() => input.Events.Count == 6);
+                Assert.Equal(RemoteInputEventKind.MouseDown, input.Events.ToArray()[3].Kind);
+                Assert.Equal(RemoteInputEventKind.MouseMove, input.Events.ToArray()[4].Kind);
+                Assert.Equal(RemoteInputEventKind.MouseUp, input.Events.ToArray()[5].Kind);
                 await Assert.ThrowsAsync<InvalidOperationException>(() => viewer.SendInputEventAsync(
                     (RemoteInputEventKind)99, 0, 0, 0, 0, 0, CancellationToken.None));
 

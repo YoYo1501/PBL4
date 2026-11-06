@@ -24,6 +24,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     public event Action<RemoteViewerFrame>? FrameReceived;
     public RemoteViewerState State { get; private set; } = RemoteViewerState.Waiting;
     public bool IsControlActive => _session?.IsControlActive == true;
+    public IRemoteChatSession? Chat => _session?.Chat;
 
     public RemoteViewerPresenter(IScreenViewerSession session) => _session = session;
 

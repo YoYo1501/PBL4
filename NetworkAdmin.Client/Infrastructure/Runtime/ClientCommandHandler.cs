@@ -1,5 +1,6 @@
 using NetworkAdmin.Client.Infrastructure.Networking;
 using NetworkAdmin.Client.Infrastructure.ScreenSharing;
+using NetworkAdmin.Client.Infrastructure.Chat;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -18,6 +19,7 @@ internal sealed class ClientCommandHandler
     private readonly ServerConnection _connection;
     private readonly string _adminToken;
     private readonly ClientScreenShareService? _screenShareService;
+    private readonly ClientChatService? _chatService;
     private readonly SemaphoreSlim _pingSlots = new(4, 4);
     private readonly ConcurrentDictionary<Task, byte> _runningTasks = new();
     private readonly ConcurrentDictionary<string, byte> _remoteCommandIds = new(StringComparer.OrdinalIgnoreCase);
@@ -50,12 +52,13 @@ internal sealed class ClientCommandHandler
     }
 
     public ClientCommandHandler(IPingService pingService, ServerConnection connection, string adminToken = "",
-        ClientScreenShareService? screenShareService = null)
+        ClientScreenShareService? screenShareService = null, ClientChatService? chatService = null)
     {
         _pingService = pingService;
         _connection = connection;
         _adminToken = adminToken;
         _screenShareService = screenShareService;
+        _chatService = chatService;
     }
 
     public void SetScanner(INetworkScannerService scannerService)
@@ -109,6 +112,12 @@ internal sealed class ClientCommandHandler
         if (envelope.Type == MessageType.ScreenShareRequest && _screenShareService is not null)
         {
             TrackTask(Task.Run(() => _screenShareService.HandleRequestAsync(envelope, cancellationToken), CancellationToken.None));
+            return;
+        }
+
+        if (envelope.Type == MessageType.RemoteChatMessage && _chatService is not null)
+        {
+            await _chatService.HandleMessageAsync(envelope, cancellationToken).ConfigureAwait(false);
             return;
         }
 

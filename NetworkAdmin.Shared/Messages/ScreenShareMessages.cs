@@ -61,7 +61,17 @@ public sealed class RemoteControlStopMessage
     public string Reason { get; set; } = string.Empty;
 }
 
-public enum RemoteInputEventKind { MouseMove = 1, MouseClick = 2, MouseWheel = 3, KeyDown = 4, KeyUp = 5 }
+public enum RemoteInputEventKind
+{
+    MouseMove = 1,
+    MouseClick = 2,
+    MouseWheel = 3,
+    KeyDown = 4,
+    KeyUp = 5,
+    // Additive events for held buttons/dragging; existing values remain unchanged.
+    MouseDown = 6,
+    MouseUp = 7
+}
 public enum RemoteMouseButton { Left = 1, Right = 2, Middle = 3 }
 
 // Coordinates are normalized to 0..10,000 and bound to the active consented screen/control requests.

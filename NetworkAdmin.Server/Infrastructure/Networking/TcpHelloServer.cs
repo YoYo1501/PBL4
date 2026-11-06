@@ -7,6 +7,8 @@ using System.Security.Cryptography.X509Certificates;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Models;
+using NetworkAdmin.Server.Infrastructure.Chat;
+using NetworkAdmin.Server.Infrastructure.Security;
 
 namespace NetworkAdmin.Server.Networking;
 
@@ -17,17 +19,23 @@ internal sealed class TcpHelloServer
     private readonly ServerCommandDispatcher _commandDispatcher;
     private readonly ConcurrentDictionary<TcpClient, byte> _activeClients = new();
     private readonly ScreenStreamingService? _screenStreaming;
+    private readonly ChatService? _chatService;
+    private readonly SecurityAlertService? _securityAlertService;
 
     public TcpHelloServer(
         ServerOptions options,
         ClientManager clientManager,
         ServerCommandDispatcher commandDispatcher,
-        ScreenStreamingService? screenStreaming = null)
+        ScreenStreamingService? screenStreaming = null,
+        ChatService? chatService = null,
+        SecurityAlertService? securityAlertService = null)
     {
         _options = options;
         _clientManager = clientManager;
         _commandDispatcher = commandDispatcher;
         _screenStreaming = screenStreaming;
+        _chatService = chatService;
+        _securityAlertService = securityAlertService;
     }
 
     private volatile bool _isListening;
@@ -37,25 +45,30 @@ internal sealed class TcpHelloServer
     {
         using var connections = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var listener = new TcpListener(_options.Host, _options.Port);
+        using var connectionSlots = new SemaphoreSlim(_options.MaxClientConnections, _options.MaxClientConnections);
         var handlers = new List<Task>();
+        var heartbeatMonitor = Task.CompletedTask;
 
         try
         {
             listener.Start();
             _isListening = true;
             Console.WriteLine($"Listening on {_options.Host}:{_options.Port}");
+            heartbeatMonitor = MonitorHeartbeatsAsync(connections.Token);
             while (!cancellationToken.IsCancellationRequested)
             {
+                await connectionSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
                 var client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
                 _activeClients.TryAdd(client, 0);
                 if (cancellationToken.IsCancellationRequested)
                 {
                     CloseClient(client);
+                    connectionSlots.Release();
                     continue;
                 }
 
                 handlers.RemoveAll(t => t.IsCompleted);
-                handlers.Add(ObserveClientHandlerAsync(client, connections.Token));
+                handlers.Add(ObserveClientHandlerAsync(client, connections.Token, connectionSlots));
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -66,6 +79,7 @@ internal sealed class TcpHelloServer
             _isListening = false;
             listener.Stop();
             await connections.CancelAsync();
+            try { await heartbeatMonitor.ConfigureAwait(false); } catch (OperationCanceledException) { }
             foreach (var client in _activeClients.Keys)
             {
                 CloseClient(client);
@@ -75,7 +89,25 @@ internal sealed class TcpHelloServer
         }
     }
 
-    private async Task ObserveClientHandlerAsync(TcpClient client, CancellationToken cancellationToken)
+    private async Task MonitorHeartbeatsAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                foreach (var stale in _clientManager.GetStaleSessions(DateTime.UtcNow, _options.HeartbeatTimeout))
+                {
+                    Console.WriteLine($"Heartbeat timeout for Client session {stale.SessionId}; closing connection.");
+                    _clientManager.Disconnect(stale.SessionId);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private async Task ObserveClientHandlerAsync(TcpClient client, CancellationToken cancellationToken,
+        SemaphoreSlim connectionSlots)
     {
         var remoteEndPoint = GetRemoteEndPoint(client);
         try
@@ -89,6 +121,7 @@ internal sealed class TcpHelloServer
         finally
         {
             CloseClient(client);
+            connectionSlots.Release();
         }
     }
 
@@ -145,16 +178,17 @@ internal sealed class TcpHelloServer
                 }
 
                 var hello = JsonLineProtocol.GetPayload<HelloMessage>(envelope);
-                if (hello is null || string.IsNullOrWhiteSpace(hello.ClientId) || string.IsNullOrWhiteSpace(hello.ClientName))
+                if (hello is null || RemoteProtocolContract.ValidateHello(hello) is not null)
                 {
                     Console.WriteLine($"Invalid hello from {remoteEndPoint}");
                     return;
                 }
 
                 sessionId = Guid.NewGuid().ToString("N");
+                var socket = client.Client;
                 var session = _clientManager.Register(hello.ClientId, hello.ClientName, sessionId, networkStream,
-                    out var replacedSession, client.Client,
-                    (client.Client.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString() ?? string.Empty);
+                    out var replacedSession, socket,
+                    (socket?.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString() ?? string.Empty);
                 if (replacedSession is not null)
                 {
                     _commandDispatcher.FailPendingForSession(replacedSession.SessionId,
@@ -176,7 +210,8 @@ internal sealed class TcpHelloServer
                     {
                         Accepted = true,
                         SessionId = sessionId,
-                        Message = "Hello accepted"
+                        Message = "Hello accepted",
+                        Capabilities = [RemoteProtocolCapabilities.RemoteSessionV1, RemoteProtocolCapabilities.RemoteChatV1]
                     },
                     serverCancellationToken).ConfigureAwait(false);
 
@@ -231,6 +266,20 @@ internal sealed class TcpHelloServer
                         continue;
                     }
 
+                    if (next.Type == MessageType.RemoteChatMessage)
+                    {
+                        if (_chatService is not null)
+                            await _chatService.HandleClientMessageAsync(session, next, serverCancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (next.Type == MessageType.SecurityAlert)
+                    {
+                        if (_securityAlertService is not null)
+                            await _securityAlertService.HandleClientMessageAsync(session, next, serverCancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
                     Console.WriteLine($"Ignoring unsupported message from {sessionId}: {next.Type}");
                 }
             }
@@ -261,6 +310,8 @@ internal sealed class TcpHelloServer
                 if (_screenStreaming is not null)
                     await _screenStreaming.StopForSessionAsync(sessionId, "Client disconnected or session ended.", notifyClient: false)
                         .ConfigureAwait(false);
+                _chatService?.EndSession(sessionId);
+                _securityAlertService?.EndSession(sessionId);
                 _clientManager.Remove(sessionId);
                 _commandDispatcher.FailPendingForSession(sessionId, new IOException($"Client disconnected: {sessionId}"));
             }

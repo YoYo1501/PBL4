@@ -33,7 +33,7 @@ internal sealed class ClientOptions
         var intervalText = GetValue(args, "--telemetry-interval-seconds")
             ?? Environment.GetEnvironmentVariable("NETWORKADMIN_TELEMETRY_INTERVAL_SECONDS");
         var interval = int.TryParse(intervalText, out var intervalSeconds) && intervalSeconds > 0
-            ? TimeSpan.FromSeconds(intervalSeconds)
+            ? TimeSpan.FromSeconds(Math.Clamp(intervalSeconds, 1, 5))
             : TimeSpan.FromSeconds(2);
 
         var networkInfoIntervalText = GetValue(args, "--network-info-interval-seconds")

@@ -20,6 +20,30 @@ public sealed class ScreenFrameProtocolTests
     }
 
     [Fact]
+    public async Task Full_delta_and_full_frames_round_trip_without_changing_wire_shape()
+    {
+        var jpeg = new byte[] { 0xFF, 0xD8, 1, 2, 0xFF, 0xD9 };
+        using var stream = new MemoryStream();
+        await ScreenFrameProtocol.WriteFrameAsync(stream,
+            new ScreenFramePacket(0, true, 0, 0, 32, 24, jpeg));
+        await ScreenFrameProtocol.WriteFrameAsync(stream,
+            new ScreenFramePacket(1, false, 8, 4, 8, 8, jpeg));
+        await ScreenFrameProtocol.WriteFrameAsync(stream,
+            new ScreenFramePacket(2, true, 0, 0, 32, 24, jpeg));
+        stream.Position = 0;
+
+        var first = await ScreenFrameProtocol.ReadFrameAsync(stream);
+        var delta = await ScreenFrameProtocol.ReadFrameAsync(stream);
+        var resync = await ScreenFrameProtocol.ReadFrameAsync(stream);
+
+        Assert.True(first!.Value.IsFullFrame);
+        Assert.False(delta!.Value.IsFullFrame);
+        Assert.Equal((8, 4, 8, 8), (delta.Value.X, delta.Value.Y, delta.Value.Width, delta.Value.Height));
+        Assert.True(resync!.Value.IsFullFrame);
+        Assert.Equal(2, resync.Value.Sequence);
+    }
+
+    [Fact]
     public async Task Oversized_frame_is_rejected_before_any_bytes_are_written()
     {
         using var stream = new MemoryStream();
@@ -60,5 +84,34 @@ public sealed class ScreenFrameProtocolTests
         invalidJpeg.Write(new byte[] { 0, 1, 2, 3 });
         invalidJpeg.Position = 0;
         await Assert.ThrowsAsync<InvalidDataException>(() => ScreenFrameProtocol.ReadFrameAsync(invalidJpeg));
+    }
+
+    [Fact]
+    public async Task Invalid_delta_header_is_rejected_before_payload_allocation()
+    {
+        using var stream = new MemoryStream();
+        var header = new byte[ScreenFrameProtocol.HeaderBytes];
+        BinaryPrimitives.WriteInt32BigEndian(header, 4);
+        BinaryPrimitives.WriteInt64BigEndian(header.AsSpan(sizeof(int)), 1);
+        header[12] = 0;
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(13), 10);
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(17), 10);
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(21), 0);
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(25), 8);
+        stream.Write(header);
+        stream.Position = 0;
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => ScreenFrameProtocol.ReadFrameAsync(stream));
+    }
+
+    [Fact]
+    public async Task Read_frame_honors_cancellation_before_reading()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        using var stream = new MemoryStream();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            ScreenFrameProtocol.ReadFrameAsync(stream, cancellation.Token));
     }
 }

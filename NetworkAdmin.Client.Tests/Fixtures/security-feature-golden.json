@@ -1,0 +1,13 @@
+{
+  "@timestamp": "2025-01-15T14:30:00Z",
+  "winlog": {
+    "event_id": 1,
+    "event_data": {
+      "User": "FIXTURE\\Analyst",
+      "Image": "C:\\Program Files\\Demo\\demo.exe",
+      "ParentImage": "C:\\Windows\\explorer.exe",
+      "CommandLine": "demo.exe --mode test",
+      "DestinationPort": 443
+    }
+  }
+}

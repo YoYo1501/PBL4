@@ -1,7 +1,9 @@
 using System.Drawing.Imaging;
 using NetworkAdmin.Server;
+using NetworkAdmin.Server.UI.Forms;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
+using System.Windows.Forms;
 using Xunit;
 
 namespace NetworkAdmin.Client.Tests;
@@ -60,6 +62,95 @@ public sealed class RemoteViewerPresenterTests
         Assert.True(patched.B > 180 && patched.R < 80 && patched.G < 80,
             $"The delta was not drawn at its declared coordinates: {patched}.");
         await presenter.StopAsync();
+    }
+
+    [Fact]
+    public async Task Presenter_accepts_a_periodic_full_frame_as_resynchronization()
+    {
+        var session = new FakePacketViewerSession([
+            new ScreenFramePacket(0, true, 0, 0, 16, 16, CreateJpeg(Color.Red, 16, 16)),
+            new ScreenFramePacket(1, false, 4, 4, 4, 4, CreateJpeg(Color.Blue, 4, 4)),
+            new ScreenFramePacket(2, true, 0, 0, 16, 16, CreateJpeg(Color.Green, 16, 16))
+        ]);
+        await using var presenter = new RemoteViewerPresenter(session);
+        using var completed = new ManualResetEventSlim();
+        var sequences = new List<long>();
+        presenter.FrameReceived += frame =>
+        {
+            sequences.Add(frame.Sequence);
+            frame.Image.Dispose();
+            if (frame.Sequence == 2) completed.Set();
+        };
+
+        presenter.Start();
+        Assert.True(completed.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal([0L, 1L, 2L], sequences);
+        await presenter.StopAsync();
+    }
+
+    [Fact]
+    public async Task Presenter_rejects_a_sequence_gap_instead_of_compositing_unknown_state()
+    {
+        var session = new FakePacketViewerSession([
+            new ScreenFramePacket(0, true, 0, 0, 16, 16, CreateJpeg(Color.Red, 16, 16)),
+            new ScreenFramePacket(2, true, 0, 0, 16, 16, CreateJpeg(Color.Green, 16, 16))
+        ]);
+        await using var presenter = new RemoteViewerPresenter(session);
+        var error = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        presenter.StateChanged += (state, detail) =>
+        {
+            if (state == RemoteViewerState.Error) error.TrySetResult(detail ?? string.Empty);
+        };
+
+        presenter.Start();
+        Assert.Contains("sequence gap", await error.Task.WaitAsync(TimeSpan.FromSeconds(10)), StringComparison.OrdinalIgnoreCase);
+        await presenter.StopAsync();
+    }
+
+    [Theory]
+    [InlineData(1000, 700, 1920, 1080)]
+    [InlineData(700, 1000, 1920, 1080)]
+    public void Viewer_fit_bounds_preserve_remote_aspect_ratio(int viewportWidth, int viewportHeight,
+        int imageWidth, int imageHeight)
+    {
+        var bounds = RemoteViewerForm.CalculateDisplayedImageBounds(
+            new Size(viewportWidth, viewportHeight), new Size(imageWidth, imageHeight), PictureBoxSizeMode.Zoom);
+
+        Assert.InRange(bounds.Width, 0.01f, viewportWidth);
+        Assert.InRange(bounds.Height, 0.01f, viewportHeight);
+        Assert.InRange(bounds.Width / bounds.Height, 1.777f, 1.779f);
+        Assert.InRange(bounds.X, 0f, viewportWidth - bounds.Width);
+        Assert.InRange(bounds.Y, 0f, viewportHeight - bounds.Height);
+    }
+
+    [Fact]
+    public void Viewer_coordinate_mapping_rejects_letterbox_and_maps_image_edges()
+    {
+        var viewport = new Size(1000, 700);
+        var image = new Size(1920, 1080);
+
+        Assert.False(RemoteViewerForm.TryMapToNormalized(new Point(10, 10), viewport, image,
+            PictureBoxSizeMode.Zoom, out _, out _));
+        Assert.True(RemoteViewerForm.TryMapToNormalized(new Point(500, 350), viewport, image,
+            PictureBoxSizeMode.Zoom, out var centerX, out var centerY));
+        Assert.InRange(centerX, 4_990, 5_010);
+        Assert.InRange(centerY, 4_990, 5_010);
+        Assert.True(RemoteViewerForm.TryMapToNormalized(new Point(999, 631), viewport, image,
+            PictureBoxSizeMode.Zoom, out var edgeX, out var edgeY));
+        Assert.InRange(edgeX, 9_990, 10_000);
+        Assert.InRange(edgeY, 9_990, 10_000);
+    }
+
+    [Fact]
+    public async Task Presenter_dispose_stops_and_disposes_the_viewer_session()
+    {
+        var session = new FakeViewerSession([]);
+        var presenter = new RemoteViewerPresenter(session);
+
+        await presenter.DisposeAsync();
+
+        Assert.Equal(1, session.StopCalls);
+        Assert.Equal(1, session.DisposeCalls);
     }
 
     [Fact]
@@ -158,7 +249,9 @@ public sealed class RemoteViewerPresenterTests
     {
         private int _index;
         private int _stopCalls;
+        private int _disposeCalls;
         public int StopCalls => Volatile.Read(ref _stopCalls);
+        public int DisposeCalls => Volatile.Read(ref _disposeCalls);
         public bool IsControlActive => false;
 
         public Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken)
@@ -181,6 +274,10 @@ public sealed class RemoteViewerPresenterTests
             return Task.CompletedTask;
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Increment(ref _disposeCalls);
+            return ValueTask.CompletedTask;
+        }
     }
 }

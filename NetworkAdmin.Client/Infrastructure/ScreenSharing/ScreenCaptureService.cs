@@ -23,8 +23,9 @@ internal sealed class ScreenCaptureService
         _jpegQuality = Math.Clamp(jpegQuality, 30, 85);
     }
 
-    public Bitmap CaptureBitmap()
+    public Bitmap CaptureBitmap(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         // Capture runs on a worker thread. Give that thread the same physical-pixel
         // coordinate space as the interactive desktop before reading bounds/capturing.
         using var dpiContext = DpiAwarenessContext.EnterPerMonitorV2();
@@ -37,43 +38,98 @@ internal sealed class ScreenCaptureService
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No active screen is available for capture.");
 
+        cancellationToken.ThrowIfCancellationRequested();
         using var source = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
         CapturePhysicalDesktop(source, bounds);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var scale = Math.Min(1d, Math.Min((double)_maxWidth / source.Width, (double)_maxHeight / source.Height));
-        if (scale >= 1d) return (Bitmap)source.Clone();
+        if (scale >= 1d)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return (Bitmap)source.Clone();
+        }
         var width = Math.Max(1, (int)(source.Width * scale));
         var height = Math.Max(1, (int)(source.Height * scale));
         using var resized = new Bitmap(width, height, PixelFormat.Format24bppRgb);
         using (var graphics = Graphics.FromImage(resized))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             graphics.CompositingQuality = CompositingQuality.HighSpeed;
             graphics.InterpolationMode = InterpolationMode.Bilinear;
             graphics.SmoothingMode = SmoothingMode.None;
             graphics.DrawImage(source, new Rectangle(0, 0, width, height));
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return (Bitmap)resized.Clone();
     }
 
-    public ScreenFramePacket? CreatePacket(Bitmap current, Bitmap? previous, long sequence, bool forceFullFrame = false)
+    /// <summary>
+    /// Captures one frame for the streaming loop without surfacing the expected
+    /// cancellation exception when Stop Sharing cancels the active session.
+    /// The original CaptureBitmap method intentionally keeps its cancellation
+    /// contract for direct callers and unit tests.
+    /// </summary>
+    public bool TryCaptureBitmap(CancellationToken cancellationToken, out Bitmap? bitmap)
     {
+        try
+        {
+            bitmap = CaptureBitmap(cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            bitmap = null;
+            return false;
+        }
+    }
+
+    public ScreenFramePacket? CreatePacket(Bitmap current, Bitmap? previous, long sequence,
+        bool forceFullFrame = false, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         if (forceFullFrame || previous is null || previous.Size != current.Size)
-            return new ScreenFramePacket(sequence, true, 0, 0, current.Width, current.Height, EncodeJpeg(current));
+        {
+            var jpeg = EncodeJpeg(current);
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ScreenFramePacket(sequence, true, 0, 0, current.Width, current.Height, jpeg);
+        }
         if (ReferenceEquals(previous, current)) return null;
 
-        var changed = FindChangeBounds(previous, current);
+        var changed = FindChangeBounds(previous, current, cancellationToken);
         if (changed.IsEmpty) return null;
         var areaRatio = (double)changed.Width * changed.Height / ((double)current.Width * current.Height);
         if (areaRatio > FullFrameThreshold)
             return new ScreenFramePacket(sequence, true, 0, 0, current.Width, current.Height, EncodeJpeg(current));
 
         using var patch = current.Clone(changed, PixelFormat.Format24bppRgb);
+        var patchJpeg = EncodeJpeg(patch);
+        cancellationToken.ThrowIfCancellationRequested();
         return new ScreenFramePacket(sequence, false, changed.X, changed.Y,
-            changed.Width, changed.Height, EncodeJpeg(patch));
+            changed.Width, changed.Height, patchJpeg);
     }
 
-    private static Rectangle FindChangeBounds(Bitmap previous, Bitmap current)
+    /// <summary>
+    /// Creates one packet for the streaming loop and treats an already-requested
+    /// cancellation as a normal stop result instead of an unhandled exception.
+    /// </summary>
+    public bool TryCreatePacket(Bitmap current, Bitmap? previous, long sequence,
+        bool forceFullFrame, CancellationToken cancellationToken, out ScreenFramePacket? packet)
+    {
+        try
+        {
+            packet = CreatePacket(current, previous, sequence, forceFullFrame, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            packet = null;
+            return false;
+        }
+    }
+
+    private static Rectangle FindChangeBounds(Bitmap previous, Bitmap current, CancellationToken cancellationToken)
     {
         var rect = new Rectangle(0, 0, current.Width, current.Height);
         var format = PixelFormat.Format24bppRgb;
@@ -92,9 +148,11 @@ internal sealed class ScreenCaptureService
             {
                 for (var blockY = 0; blockY < current.Height; blockY += BlockSize)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var endY = Math.Min(blockY + BlockSize, current.Height);
                     for (var y = blockY; y < endY; y++)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         Marshal.Copy(IntPtr.Add(oldData.Scan0, y * oldData.Stride), oldRow, 0, rowBytes);
                         Marshal.Copy(IntPtr.Add(newData.Scan0, y * newData.Stride), newRow, 0, rowBytes);
                         for (var blockX = 0; blockX < current.Width; blockX += BlockSize)

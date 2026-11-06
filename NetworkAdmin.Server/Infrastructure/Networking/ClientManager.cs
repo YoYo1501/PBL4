@@ -36,7 +36,9 @@ internal sealed class ClientManager
             if (replacedSession is not null)
             {
                 _sessions.TryRemove(new KeyValuePair<string, ClientSessionInfo>(replacedSession.SessionId, replacedSession));
-                replacedSession.Stream.Dispose();
+                replacedSession.IsReady = false;
+                try { replacedSession.Stream.Dispose(); } catch { }
+                try { replacedSession.Socket?.Dispose(); } catch { }
             }
             _sessions[sessionId] = session;
         }
@@ -64,7 +66,10 @@ internal sealed class ClientManager
     {
         // Writers may still hold or await the semaphore. Let it be collected with the session.
         if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            session.IsReady = false;
             _sessions.TryRemove(new KeyValuePair<string, ClientSessionInfo>(sessionId, session));
+        }
     }
 
     public bool UpdateNetworkInfo(string sessionId, ClientNetworkInfo networkInfo, out ClientSessionInfo? session)
@@ -104,6 +109,18 @@ internal sealed class ClientManager
 
     public IReadOnlyList<ClientSessionInfo> GetSessions() =>
         _sessions.Values.Where(s => s.IsReady).OrderBy(s => s.ConnectedAt).ToList();
+
+    public IReadOnlyList<ClientSessionInfo> GetStaleSessions(DateTime utcNow, TimeSpan timeout) =>
+        _sessions.Values.Where(s => s.IsReady && utcNow - s.LastSeen > timeout).ToList();
+
+    public bool Disconnect(string sessionId)
+    {
+        if (!_sessions.TryRemove(sessionId, out var session)) return false;
+        session.IsReady = false;
+        try { session.Stream.Dispose(); } catch { }
+        try { session.Socket?.Dispose(); } catch { }
+        return true;
+    }
 
     public bool TryGetActiveSession(string clientId, out ClientSessionInfo? session)
     {

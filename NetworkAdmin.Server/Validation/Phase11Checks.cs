@@ -85,7 +85,7 @@ internal static class Phase11Checks
                 RemoteAdministrationCommandPolicy.MinimumCountdownSeconds, default, () => false,
                 () => { }, () => { }, (_, _, _, _) => { });
             check(dashboardState.PowerError && !dashboardState.PowerPending
-                && dashboardState.PowerStatus.Contains("not configured", StringComparison.OrdinalIgnoreCase),
+                && dashboardState.PowerStatus.Contains("Rejected", StringComparison.OrdinalIgnoreCase),
                 "Phase 11: dashboard presenter surfaces rejected power command without scheduling it");
             var oldSession = first.SessionId;
             var manager = (ClientManager)typeof(ServerRuntime).GetField("_clients", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(server)!;

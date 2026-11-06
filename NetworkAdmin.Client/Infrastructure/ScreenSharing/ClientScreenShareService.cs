@@ -25,6 +25,7 @@ internal sealed class ClientScreenShareService
     private string? _controlRequestId;
     private bool _controlActive;
     private long _lastMouseMoveTimestamp;
+    private readonly RemoteInputRateLimiter _inputRateLimiter = new();
 
     public ClientScreenShareService(ClientOptions options, ServerConnection control, IScreenShareConsent ui,
         IRemoteInputService? remoteInput = null)
@@ -157,8 +158,12 @@ internal sealed class ClientScreenShareService
         lock (_sync)
         {
             _approved = null;
-            _consentRequest?.Cancel();
-            _controlConsentRequest?.Cancel();
+            var consentRequest = _consentRequest;
+            var controlConsentRequest = _controlConsentRequest;
+            _consentRequest = null;
+            _controlConsentRequest = null;
+            consentRequest?.Cancel();
+            controlConsentRequest?.Cancel();
             _activeShare?.Cancel();
             controlRequestId = _controlRequestId;
             screenRequestId = _activeScreenRequestId;
@@ -236,6 +241,7 @@ internal sealed class ClientScreenShareService
                 !RemoteInputEventPolicy.IsValid(input, _control.ClientId, _control.SessionId ?? string.Empty,
                     _activeScreenRequestId, _controlRequestId))
                 return;
+            if (!_inputRateLimiter.TryAcquire()) return;
             if (input!.Kind == RemoteInputEventKind.MouseMove)
             {
                 var now = Stopwatch.GetTimestamp();
@@ -314,12 +320,20 @@ internal sealed class ClientScreenShareService
                 Bitmap? current = null;
                 try
                 {
-                    current = await Task.Run(_capture.CaptureBitmap, cancellationToken).ConfigureAwait(false);
+                    var captureCompleted = await Task.Run(
+                        () => _capture.TryCaptureBitmap(cancellationToken, out var bitmap)
+                            ? bitmap : null,
+                        CancellationToken.None).ConfigureAwait(false);
+                    current = captureCompleted;
+                    if (current is null) break;
                     var captured = current;
                     var forceKeyFrame = lastFullFrameAt == 0 ||
                         Stopwatch.GetElapsedTime(lastFullFrameAt) >= TimeSpan.FromSeconds(1);
-                    var packet = await Task.Run(() => _capture.CreatePacket(captured, previous, sequence, forceKeyFrame), cancellationToken)
-                        .ConfigureAwait(false);
+                    ScreenFramePacket? packet = null;
+                    var packetCompleted = await Task.Run(() => _capture.TryCreatePacket(
+                        captured, previous, sequence, forceKeyFrame, cancellationToken, out packet),
+                        CancellationToken.None).ConfigureAwait(false);
+                    if (!packetCompleted) break;
                     if (packet is { } framePacket)
                     {
                         await ScreenFrameProtocol.WriteFrameAsync(stream, framePacket, cancellationToken).ConfigureAwait(false);
@@ -330,10 +344,25 @@ internal sealed class ClientScreenShareService
                         current = null;
                     }
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Screen capture failed; retrying: {ex.Message}");
+                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                }
                 finally { current?.Dispose(); }
 
                 if (!await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false)) break;
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Cancellation is the normal stop/disconnect path. Handle it in the
+            // capture loop so the debugger does not report the expected token
+            // cancellation from ScreenCaptureService as an unhandled failure.
         }
         finally { previous?.Dispose(); }
     }

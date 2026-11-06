@@ -21,5 +21,18 @@ public enum MessageType
     ControlRequest = 17,
     ControlConsent = 18,
     ControlStop = 19,
-    ControlInputEvent = 20
+    ControlInputEvent = 20,
+    RemoteSessionRequest = 21,
+    RemoteSessionResponse = 22,
+    RemoteSessionStart = 23,
+    RemoteSessionStop = 24,
+    RemoteSessionStatus = 25,
+    RemoteSessionError = 26,
+    RemoteSessionCancel = 27,
+    RemoteChatMessage = 28,
+    SecurityEvent = 29,
+    SecurityAlert = 30,
+    MonitoringStatus = 31,
+    MonitoringStart = 32,
+    MonitoringStop = 33
 }

@@ -13,6 +13,7 @@ internal sealed class WindowsRemoteInputService : IRemoteInputService
     private const uint KeyUp = 0x0002;
     private readonly object _sync = new();
     private readonly HashSet<ushort> _pressedKeys = [];
+    private readonly HashSet<RemoteMouseButton> _pressedButtons = [];
 
     public bool Execute(RemoteInputEventMessage input)
     {
@@ -21,6 +22,8 @@ internal sealed class WindowsRemoteInputService : IRemoteInputService
         {
             RemoteInputEventKind.MouseMove => Send([MouseAt(input.X, input.Y, 0, 0)]),
             RemoteInputEventKind.MouseClick => Click(input),
+            RemoteInputEventKind.MouseDown => Button(input, down: true),
+            RemoteInputEventKind.MouseUp => Button(input, down: false),
             RemoteInputEventKind.MouseWheel => Send([MouseAt(input.X, input.Y, unchecked((uint)input.WheelDelta), MouseWheel)]),
             RemoteInputEventKind.KeyDown => Key(input.VirtualKeyCode, up: false),
             RemoteInputEventKind.KeyUp => Key(input.VirtualKeyCode, up: true),
@@ -33,10 +36,15 @@ internal sealed class WindowsRemoteInputService : IRemoteInputService
         if (!OperatingSystem.IsWindows()) return;
         lock (_sync)
         {
-            if (_pressedKeys.Count == 0) return;
-            var release = _pressedKeys.Select(key => Keyboard(key, KeyUp)).ToArray();
-            _pressedKeys.Clear();
-            _ = Send(release);
+            if (_pressedKeys.Count == 0 && _pressedButtons.Count == 0) return;
+            var release = _pressedButtons.Select(button => MouseButton(button, down: false))
+                .Concat(_pressedKeys.Select(key => Keyboard(key, KeyUp)))
+                .ToArray();
+            if (Send(release))
+            {
+                _pressedKeys.Clear();
+                _pressedButtons.Clear();
+            }
         }
     }
 
@@ -52,8 +60,33 @@ internal sealed class WindowsRemoteInputService : IRemoteInputService
         return down != 0 && Send([MouseAt(input.X, input.Y, 0, 0), MouseAt(input.X, input.Y, 0, down), MouseAt(input.X, input.Y, 0, up)]);
     }
 
+    private bool Button(RemoteInputEventMessage input, bool down)
+    {
+        var flags = ButtonFlags(input.Button, down);
+        if (flags == 0) return false;
+        lock (_sync)
+        {
+            var sent = Send([MouseAt(input.X, input.Y, 0, flags)]);
+            if (sent)
+            {
+                if (down) _pressedButtons.Add(input.Button);
+                else _pressedButtons.Remove(input.Button);
+            }
+            return sent;
+        }
+    }
+
+    private static uint ButtonFlags(RemoteMouseButton button, bool down) => button switch
+    {
+        RemoteMouseButton.Left => down ? LeftDown : LeftUp,
+        RemoteMouseButton.Right => down ? RightDown : RightUp,
+        RemoteMouseButton.Middle => down ? MiddleDown : MiddleUp,
+        _ => 0
+    };
+
     private bool Key(int key, bool up)
     {
+        if (key is < 1 or > 255) return false;
         lock (_sync)
         {
             if (up) _pressedKeys.Remove((ushort)key);
@@ -72,6 +105,9 @@ internal sealed class WindowsRemoteInputService : IRemoteInputService
             Flags = flags | MouseMove | MouseAbsolute | MouseVirtualDesk, ExtraInfo = 0
         } } };
     }
+
+    private static Input MouseButton(RemoteMouseButton button, bool down) =>
+        new() { Type = InputMouse, Union = new InputUnion { Mouse = new MouseInput { Flags = ButtonFlags(button, down) } } };
 
     private static Input Keyboard(ushort virtualKey, uint flags) =>
         new() { Type = InputKeyboard, Union = new InputUnion { Keyboard = new KeyboardInput { VirtualKey = virtualKey, Flags = flags } } };
