@@ -2,8 +2,7 @@
   "profiles": {
     "NetworkAdmin.Server": {
       "commandName": "Project",
-      //"commandLineArgs": "--host 127.0.0.1 --port 5000 --screen-port 5001 --admin-token local-test-token"
-      "commandLineArgs": "--host 172.31.98.213 --port 5000 --screen-port 5001 --admin-token abc123"
+      "commandLineArgs": "--host 172.31.99.131 --port 5000 --screen-port 5001 --admin-token abc123"
     }
   }
 }

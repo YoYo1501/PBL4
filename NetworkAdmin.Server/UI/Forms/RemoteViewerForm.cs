@@ -1,16 +1,18 @@
 using NetworkAdmin.Server.UI;
 using System.Diagnostics;
 using NetworkAdmin.Shared.Messages;
+using NetworkAdmin.Shared.Diagnostics;
 
 namespace NetworkAdmin.Server.UI.Forms;
 
 internal sealed class RemoteViewerForm : Form
 {
     private readonly RemoteViewerPresenter _presenter;
+    private readonly ScreenSharePerformanceMonitor? _performance;
     private readonly string _clientName;
     private readonly string _clientId;
     private readonly Panel _canvas = new() { Dock = DockStyle.Fill, AutoScroll = false, BackColor = DashboardTheme.Background };
-    private readonly PictureBox _picture = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(1, 10, 18), TabStop = true };
+    private readonly MeasuredPictureBox _picture = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(1, 10, 18), TabStop = true };
     private readonly Label _state = DashboardTheme.Label("WAITING", 9, true, DashboardTheme.Muted);
     private readonly Label _fps = DashboardTheme.Label("-- FPS", 9, true, DashboardTheme.Blue);
     private readonly Label _resolution = DashboardTheme.Label("-- × --", 9, color: DashboardTheme.Muted);
@@ -50,7 +52,9 @@ internal sealed class RemoteViewerForm : Form
     {
         _clientName = clientName;
         _clientId = clientId;
-        _presenter = new RemoteViewerPresenter(connect);
+        _performance = ScreenSharePerformanceMonitor.Enabled ? new ScreenSharePerformanceMonitor() : null;
+        _presenter = new RemoteViewerPresenter(connect, _performance);
+        _picture.Performance = _performance;
         Text = $"Remote Viewer — {clientName}";
         StartPosition = FormStartPosition.CenterParent;
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -220,6 +224,7 @@ internal sealed class RemoteViewerForm : Form
                 frame.Image.Dispose();
                 return;
             }
+            if (_pendingFrame is not null) _performance?.DroppedFrame();
             _pendingFrame?.Image.Dispose();
             _pendingFrame = frame;
             if (_frameUpdatePosted) return;
@@ -242,6 +247,7 @@ internal sealed class RemoteViewerForm : Form
 
     private void ApplyPendingFrame()
     {
+        var renderStarted = Stopwatch.GetTimestamp();
         RemoteViewerFrame? frame;
         lock (_frameSync)
         {
@@ -250,6 +256,8 @@ internal sealed class RemoteViewerForm : Form
             _frameUpdatePosted = false;
         }
         if (frame is null) return;
+        _performance?.ViewerFrame();
+        _performance?.ViewerLatency(Stopwatch.GetTimestamp() - frame.ReceivedAtTimestamp);
         if (IsDisposed)
         {
             frame.Image.Dispose();
@@ -263,6 +271,7 @@ internal sealed class RemoteViewerForm : Form
         SetFooter($"Streaming from {_clientName}  •  frame {frame.Sequence}");
         if (_actualSize) ApplyPictureSize(frame.Width, frame.Height);
         old?.Dispose();
+        _performance?.UiUpdate(Stopwatch.GetTimestamp() - renderStarted);
     }
 
     private void SetFitMode()
@@ -577,6 +586,7 @@ internal sealed class RemoteViewerForm : Form
             _currentBitmap?.Dispose();
             _currentBitmap = null;
             _toolTip.Dispose();
+            _performance?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -597,5 +607,19 @@ internal sealed class RemoteViewerForm : Form
             Margin = new Padding(3),
             FlatAppearance = { BorderColor = DashboardTheme.Border, MouseOverBackColor = Color.FromArgb(15, 91, 154) }
         };
+    }
+}
+
+internal sealed class MeasuredPictureBox : PictureBox
+{
+    [System.ComponentModel.Browsable(false)]
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public ScreenSharePerformanceMonitor? Performance { get; set; }
+
+    protected override void OnPaint(PaintEventArgs pe)
+    {
+        var started = Stopwatch.GetTimestamp();
+        base.OnPaint(pe);
+        Performance?.Render(Stopwatch.GetTimestamp() - started);
     }
 }

@@ -1,13 +1,14 @@
 using System.Diagnostics;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Server.Application.Interfaces;
+using NetworkAdmin.Shared.Diagnostics;
 
 namespace NetworkAdmin.Server.Presentation;
 
 internal enum RemoteViewerState { Waiting, Connecting, Streaming, Disconnected, Error }
 
 internal sealed record RemoteViewerFrame(Bitmap Image, long Sequence, double FramesPerSecond,
-    int Width, int Height);
+    int Width, int Height, long ReceivedAtTimestamp);
 
 // Owns frame I/O and decoding. The view receives only decoded, disposable frames and state updates.
 internal sealed class RemoteViewerPresenter : IAsyncDisposable
@@ -16,6 +17,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     private IScreenViewerSession? _session;
     private readonly CancellationTokenSource _stop = new();
     private readonly SemaphoreSlim _inputLock = new(1, 1);
+    private readonly ScreenSharePerformanceMonitor? _performance;
     private Task? _runTask;
     private int _started;
     private int _stopped;
@@ -26,9 +28,11 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     public bool IsControlActive => _session?.IsControlActive == true;
     public IRemoteChatSession? Chat => _session?.Chat;
 
-    public RemoteViewerPresenter(IScreenViewerSession session) => _session = session;
+    public RemoteViewerPresenter(IScreenViewerSession session, ScreenSharePerformanceMonitor? performance = null)
+    { _session = session; _performance = performance; }
 
-    public RemoteViewerPresenter(Func<CancellationToken, Action, Task<IScreenViewerSession>> connect) => _connect = connect;
+    public RemoteViewerPresenter(Func<CancellationToken, Action, Task<IScreenViewerSession>> connect,
+        ScreenSharePerformanceMonitor? performance = null) { _connect = connect; _performance = performance; }
 
     public void Start()
     {
@@ -80,6 +84,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
 
     private async Task RunFramePipelineAsync(CancellationToken cancellationToken)
     {
+        _performance?.Start();
         var timestamps = new Queue<long>();
         Bitmap? composite = null;
         long lastSequence = -1;
@@ -89,12 +94,15 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
             {
                 var frame = await _session!.ReadScreenFrameAsync(cancellationToken).ConfigureAwait(false);
                 if (frame is not { } packet) break;
+                var receivedAt = Stopwatch.GetTimestamp();
                 if (packet.Sequence != lastSequence + 1)
                     throw new InvalidDataException($"Screen frame sequence gap: expected {lastSequence + 1}, received {packet.Sequence}.");
 
                 if (packet.IsFullFrame)
                 {
+                    var decodeStarted = Stopwatch.GetTimestamp();
                     var full = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
+                    _performance?.Decode(Stopwatch.GetTimestamp() - decodeStarted, packet.Jpeg.Length);
                     if ((packet.Width != 0 && packet.Width != full.Width) ||
                         (packet.Height != 0 && packet.Height != full.Height))
                     {
@@ -108,15 +116,19 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
                 {
                     if (composite is null)
                         throw new InvalidDataException("Received a screen delta before the first full frame.");
+                    var decodeStarted = Stopwatch.GetTimestamp();
                     var patch = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
+                    _performance?.Decode(Stopwatch.GetTimestamp() - decodeStarted, packet.Jpeg.Length);
                     try
                     {
                         if (patch.Width != packet.Width || patch.Height != packet.Height ||
                             packet.X + patch.Width > composite.Width || packet.Y + patch.Height > composite.Height)
                             throw new InvalidDataException("Screen delta rectangle is outside the current frame.");
+                        var compositeStarted = Stopwatch.GetTimestamp();
                         using var graphics = Graphics.FromImage(composite);
                         graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
                         graphics.DrawImageUnscaled(patch, packet.X, packet.Y);
+                        _performance?.Composite(Stopwatch.GetTimestamp() - compositeStarted);
                     }
                     finally { patch.Dispose(); }
                 }
@@ -127,8 +139,10 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
                 while (timestamps.Count > 1 && Stopwatch.GetElapsedTime(timestamps.Peek(), now) > TimeSpan.FromSeconds(1))
                     timestamps.Dequeue();
                 var fps = timestamps.Count < 2 ? 0 : (timestamps.Count - 1) / Stopwatch.GetElapsedTime(timestamps.Peek(), now).TotalSeconds;
+                var cloneStarted = Stopwatch.GetTimestamp();
                 var image = await Task.Run(() => (Bitmap)composite!.Clone(), cancellationToken).ConfigureAwait(false);
-                var update = new RemoteViewerFrame(image, packet.Sequence, fps, composite.Width, composite.Height);
+                _performance?.Clone(Stopwatch.GetTimestamp() - cloneStarted);
+                var update = new RemoteViewerFrame(image, packet.Sequence, fps, composite.Width, composite.Height, receivedAt);
                 var handler = FrameReceived;
                 if (handler is null) image.Dispose();
                 else
@@ -141,7 +155,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex) { SetState(RemoteViewerState.Error, ex.GetBaseException().Message); }
-        finally { composite?.Dispose(); }
+        finally { composite?.Dispose(); _performance?.Stop(); }
     }
 
     private void SetState(RemoteViewerState state, string? detail = null)

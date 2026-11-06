@@ -1,4 +1,5 @@
 using NetworkAdmin.Shared.Messages;
+using NetworkAdmin.Shared.Diagnostics;
 using System.Security.Cryptography;
 
 namespace NetworkAdmin.Server;
@@ -8,6 +9,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        ScreenSharePerformanceMonitor.Configure(args);
         if (args.Contains("--console", StringComparer.OrdinalIgnoreCase))
         {
             AllocConsole();

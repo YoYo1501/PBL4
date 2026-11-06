@@ -19,6 +19,24 @@ namespace NetworkAdmin.Client.Tests;
 public sealed class ScreenStreamingTests
 {
     [Fact]
+    public async Task View_request_without_server_admin_token_fails_before_contacting_client()
+    {
+        var options = new TestClientFixture().ServerOptions(IPAddress.Loopback, ReservePort(), adminToken: "");
+        var server = new ServerRuntime(options);
+        server.Start();
+        await Eventually(() => server.IsRunning);
+        await using var agent = await TestAgent.ConnectAsync(options.Port);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                server.RequestScreenAsync(agent.ClientId, agent.SessionId, CancellationToken.None));
+
+            Assert.Contains("NETWORKADMIN_ADMIN_TOKEN", error.Message, StringComparison.Ordinal);
+        }
+        finally { await server.StopAsync(); }
+    }
+
+    [Fact]
     public async Task Pinned_tls_client_executes_only_consented_session_bound_input_and_releases_on_client_stop()
     {
         using var certificate = CreateTlsCertificate();

@@ -76,16 +76,26 @@ dotnet run --project NetworkAdmin.Client -- --standalone
 
 The Server and screen TCP channels now require TLS 1.2 or newer. Configure each Client with the SHA-256 fingerprint displayed by the Server; see [PHASE4_TLS.md](PHASE4_TLS.md) for LAN setup.
 
+Remote screen viewing also requires a non-empty `NETWORKADMIN_ADMIN_TOKEN` on the Server. The Server validates this token before sending a consent request; if it is missing, the Client will not receive a prompt. Generate one secret and configure the same value on both machines (do not commit it to launch settings or source control). In PowerShell, generate it once on a trusted machine and transfer it securely:
+
+```powershell
+$tokenBytes = [byte[]]::new(32)
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+$env:NETWORKADMIN_ADMIN_TOKEN = [Convert]::ToBase64String($tokenBytes)
+```
+
+Set `$env:NETWORKADMIN_ADMIN_TOKEN` to that same value in the Server and Client terminals, then pass it to both processes with `--admin-token $env:NETWORKADMIN_ADMIN_TOKEN`. In Visual Studio, set `NETWORKADMIN_ADMIN_TOKEN` in each project's Debug environment variables instead. The Client needs the same token for authenticated remote administration commands; screen consent itself remains an explicit Client decision.
+
 Khởi chạy Server:
 
 ```powershell
-dotnet run --no-launch-profile --project NetworkAdmin.Server -- --host 0.0.0.0 --port 5000 --screen-port 5001
+dotnet run --no-launch-profile --project NetworkAdmin.Server -- --host 0.0.0.0 --port 5000 --screen-port 5001 --admin-token $env:NETWORKADMIN_ADMIN_TOKEN
 ```
 
 Khởi chạy Client với IP LAN của Server:
 
 ```powershell
-dotnet run --no-launch-profile --project NetworkAdmin.Client -- --host <SERVER_LAN_IP> --port 5000
+dotnet run --no-launch-profile --project NetworkAdmin.Client -- --host <SERVER_LAN_IP> --port 5000 --admin-token $env:NETWORKADMIN_ADMIN_TOKEN
 ```
 
 Client tự kết nối và reconnect. Trong dashboard Server, chọn Client Online rồi nhấn **View Screen**. Client phải bấm chấp thuận trước khi Server cấp capability một lần và Client mở kênh ảnh. Từ chối, Stop Sharing, đóng Viewer, disconnect hoặc reconnect đều kết thúc phiên; consent không được khôi phục sau reconnect. Mỗi Client chỉ có tối đa một phiên xem.

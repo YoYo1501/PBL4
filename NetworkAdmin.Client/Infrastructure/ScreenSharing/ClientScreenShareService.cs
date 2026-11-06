@@ -6,6 +6,7 @@ using NetworkAdmin.Client.Application.Interfaces;
 using NetworkAdmin.Client.Infrastructure.Networking;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
+using NetworkAdmin.Shared.Diagnostics;
 
 namespace NetworkAdmin.Client.Infrastructure.ScreenSharing;
 
@@ -15,6 +16,7 @@ internal sealed class ClientScreenShareService
     private readonly ServerConnection _control;
     private readonly IScreenShareConsent _ui;
     private readonly ScreenCaptureService _capture;
+    private readonly ScreenSharePerformanceMonitor? _performance;
     private readonly IRemoteInputService _remoteInput;
     private readonly object _sync = new();
     private ApprovedRequest? _approved;
@@ -33,7 +35,8 @@ internal sealed class ClientScreenShareService
         _options = options;
         _control = control;
         _ui = ui;
-        _capture = new ScreenCaptureService(options.ScreenMaxWidth, options.ScreenMaxHeight, options.ScreenJpegQuality);
+        _performance = ScreenSharePerformanceMonitor.Enabled ? new ScreenSharePerformanceMonitor() : null;
+        _capture = new ScreenCaptureService(options.ScreenMaxWidth, options.ScreenMaxHeight, options.ScreenJpegQuality, _performance);
         _remoteInput = remoteInput ?? new WindowsRemoteInputService();
     }
 
@@ -307,12 +310,13 @@ internal sealed class ClientScreenShareService
         if (ready?.Type != MessageType.ScreenChannelReady || ready.RequestId != requestId)
             throw new InvalidDataException("Server did not accept the one-time screen capability.");
 
+        _performance?.Start();
         onConnected();
         long sequence = 0;
         Bitmap? previous = null;
         using var pipelineStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var pipelineToken = pipelineStop.Token;
-        using var latestFrames = new LatestBitmapBuffer();
+        using var latestFrames = new LatestBitmapBuffer(_performance);
         var captureTask = Task.Run(() => CaptureLatestFramesAsync(latestFrames, pipelineToken), CancellationToken.None);
         try
         {
@@ -330,7 +334,9 @@ internal sealed class ClientScreenShareService
                     if (!packetCompleted) break;
                     if (packet is not { } framePacket) continue;
 
+                    var sendStarted = Stopwatch.GetTimestamp();
                     await ScreenFrameProtocol.WriteFrameAsync(stream, framePacket, cancellationToken).ConfigureAwait(false);
+                    _performance?.Send(Stopwatch.GetTimestamp() - sendStarted, framePacket.Jpeg.Length);
                     sequence++;
                     previous?.Dispose();
                     previous = current;
@@ -351,6 +357,7 @@ internal sealed class ClientScreenShareService
             try { await captureTask.ConfigureAwait(false); }
             catch (OperationCanceledException) when (pipelineToken.IsCancellationRequested) { }
             previous?.Dispose();
+            _performance?.Stop();
         }
     }
 
@@ -362,10 +369,12 @@ internal sealed class ClientScreenShareService
             var started = Stopwatch.GetTimestamp();
             try
             {
+                var captureStarted = Stopwatch.GetTimestamp();
                 var captured = await Task.Run(
                     () => _capture.TryCaptureBitmap(cancellationToken, out var bitmap) ? bitmap : null,
                     CancellationToken.None).ConfigureAwait(false);
                 if (captured is null) break;
+                _performance?.Capture(Stopwatch.GetTimestamp() - captureStarted);
                 latestFrames.Publish(captured);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -389,9 +398,12 @@ internal sealed class ClientScreenShareService
     private sealed class LatestBitmapBuffer : IDisposable
     {
         private readonly object _sync = new();
+        private readonly ScreenSharePerformanceMonitor? _performance;
         private Bitmap? _latest;
         private TaskCompletionSource<bool>? _signal;
         private bool _disposed;
+
+        public LatestBitmapBuffer(ScreenSharePerformanceMonitor? performance) => _performance = performance;
 
         public void Publish(Bitmap bitmap)
         {
@@ -409,7 +421,11 @@ internal sealed class ClientScreenShareService
                 signal = _signal;
                 _signal = null;
             }
-            replaced?.Dispose();
+            if (replaced is not null)
+            {
+                _performance?.DroppedFrame();
+                replaced.Dispose();
+            }
             signal?.TrySetResult(true);
         }
 

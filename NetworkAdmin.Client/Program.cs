@@ -12,6 +12,7 @@ using NetworkAdmin.Client.Infrastructure.Scanning;
 using NetworkAdmin.Client.UI.Services;
 using NetworkAdmin.Client.Application.Presentation;
 using NetworkAdmin.Client.UI.Forms;
+using NetworkAdmin.Shared.Diagnostics;
 
 namespace NetworkAdmin.Client;
 
@@ -21,6 +22,7 @@ internal static class Program
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        ScreenSharePerformanceMonitor.Configure(args);
         var standalone = args.Contains("--standalone", StringComparer.OrdinalIgnoreCase);
         ClientOptions options;
         try

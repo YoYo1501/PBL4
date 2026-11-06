@@ -106,9 +106,15 @@ internal sealed class ServerRuntime : IServerRuntime
         RequestScreenCoreAsync(clientId, sessionId, token, onConnecting);
 
     private async Task<IScreenViewerSession> RequestScreenCoreAsync(string clientId, string sessionId,
-        CancellationToken token, Action? onConnecting) =>
-        await _screenStreaming.RequestAsync(clientId, sessionId,
+        CancellationToken token, Action? onConnecting)
+    {
+        if (string.IsNullOrWhiteSpace(_adminToken))
+            throw new InvalidOperationException(
+                "Remote screen viewing requires an administrator token. Set NETWORKADMIN_ADMIN_TOKEN or pass --admin-token to the Server.");
+
+        return await _screenStreaming.RequestAsync(clientId, sessionId,
             CreateSessionAuthorization(RemoteSessionPermission.ViewOnly), token, onConnecting).ConfigureAwait(false);
+    }
 
     public bool IsScreenSharing(string clientId) => _screenStreaming.HasSession(clientId);
 
