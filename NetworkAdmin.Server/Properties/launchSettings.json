@@ -3,9 +3,10 @@
     "NetworkAdmin.Server": {
       "commandName": "Project",
       "environmentVariables": {
-        "NETWORKADMIN_SCREEN_V2": "true"
+        "NETWORKADMIN_SCREEN_V2": "true",
+        "NETWORKADMIN_SCREEN_PERFORMANCE": "true"
       },
-      "commandLineArgs": "--host 172.31.99.131 --port 5000 --screen-port 5001 --admin-token abc123"
+      "commandLineArgs": "--host 10.103.69.174 --port 5000 --screen-port 5001 --admin-token abc123"
     }
   }
 }
