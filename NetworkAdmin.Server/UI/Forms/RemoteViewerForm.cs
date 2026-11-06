@@ -269,7 +269,10 @@ internal sealed class RemoteViewerForm : Form
     {
         _actualSize = false;
         _canvas.AutoScroll = false;
-        _picture.Dock = DockStyle.None;
+        // Let WinForms keep the image viewport equal to the canvas on every
+        // resize/DPI change. Zoom then fits the complete remote frame instead
+        // of leaving a 3200x2000 bitmap at its native size in a smaller window.
+        _picture.Dock = DockStyle.Fill;
         // Fit the complete remote frame without distorting its aspect ratio.
         _picture.SizeMode = PictureBoxSizeMode.Zoom;
         ApplyFitBounds();
@@ -279,7 +282,7 @@ internal sealed class RemoteViewerForm : Form
     private void ApplyFitBounds()
     {
         if (_canvas.ClientSize.Width <= 0 || _canvas.ClientSize.Height <= 0) return;
-        _picture.SetBounds(0, 0, _canvas.ClientSize.Width, _canvas.ClientSize.Height);
+        _picture.Dock = DockStyle.Fill;
         _picture.BringToFront();
     }
 

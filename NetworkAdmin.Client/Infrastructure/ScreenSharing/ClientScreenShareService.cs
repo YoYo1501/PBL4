@@ -309,53 +309,34 @@ internal sealed class ClientScreenShareService
 
         onConnected();
         long sequence = 0;
-        long lastFullFrameAt = 0;
         Bitmap? previous = null;
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1d / _options.ScreenMaxFps));
+        using var pipelineStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var pipelineToken = pipelineStop.Token;
+        using var latestFrames = new LatestBitmapBuffer();
+        var captureTask = Task.Run(() => CaptureLatestFramesAsync(latestFrames, pipelineToken), CancellationToken.None);
         try
         {
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                Bitmap? current = null;
+                var current = await latestFrames.TakeAsync(cancellationToken).ConfigureAwait(false);
+                if (current is null) break;
                 try
                 {
-                    var captureCompleted = await Task.Run(
-                        () => _capture.TryCaptureBitmap(cancellationToken, out var bitmap)
-                            ? bitmap : null,
-                        CancellationToken.None).ConfigureAwait(false);
-                    current = captureCompleted;
-                    if (current is null) break;
-                    var captured = current;
-                    var forceKeyFrame = lastFullFrameAt == 0 ||
-                        Stopwatch.GetElapsedTime(lastFullFrameAt) >= TimeSpan.FromSeconds(1);
                     ScreenFramePacket? packet = null;
                     var packetCompleted = await Task.Run(() => _capture.TryCreatePacket(
-                        captured, previous, sequence, forceKeyFrame, cancellationToken, out packet),
-                        CancellationToken.None).ConfigureAwait(false);
+                        current, previous, sequence, forceFullFrame: previous is null,
+                        cancellationToken, out packet), CancellationToken.None).ConfigureAwait(false);
                     if (!packetCompleted) break;
-                    if (packet is { } framePacket)
-                    {
-                        await ScreenFrameProtocol.WriteFrameAsync(stream, framePacket, cancellationToken).ConfigureAwait(false);
-                        if (framePacket.IsFullFrame) lastFullFrameAt = Stopwatch.GetTimestamp();
-                        sequence++;
-                        previous?.Dispose();
-                        previous = current;
-                        current = null;
-                    }
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Screen capture failed; retrying: {ex.Message}");
-                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                    if (packet is not { } framePacket) continue;
+
+                    await ScreenFrameProtocol.WriteFrameAsync(stream, framePacket, cancellationToken).ConfigureAwait(false);
+                    sequence++;
+                    previous?.Dispose();
+                    previous = current;
+                    current = null;
                 }
                 finally { current?.Dispose(); }
-
-                if (!await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false)) break;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -364,7 +345,111 @@ internal sealed class ClientScreenShareService
             // capture loop so the debugger does not report the expected token
             // cancellation from ScreenCaptureService as an unhandled failure.
         }
-        finally { previous?.Dispose(); }
+        finally
+        {
+            pipelineStop.Cancel();
+            try { await captureTask.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (pipelineToken.IsCancellationRequested) { }
+            previous?.Dispose();
+        }
+    }
+
+    private async Task CaptureLatestFramesAsync(LatestBitmapBuffer latestFrames, CancellationToken cancellationToken)
+    {
+        var frameInterval = TimeSpan.FromSeconds(1d / _options.ScreenMaxFps);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                var captured = await Task.Run(
+                    () => _capture.TryCaptureBitmap(cancellationToken, out var bitmap) ? bitmap : null,
+                    CancellationToken.None).ConfigureAwait(false);
+                if (captured is null) break;
+                latestFrames.Publish(captured);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Screen capture failed; retrying: {ex.Message}");
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            }
+
+            var remaining = frameInterval - Stopwatch.GetElapsedTime(started);
+            if (remaining > TimeSpan.Zero)
+                await Task.Delay(remaining, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    // RemoteX keeps only the newest captured frame. This prevents a slow JPEG
+    // encode or network write from building an unbounded queue of stale frames.
+    private sealed class LatestBitmapBuffer : IDisposable
+    {
+        private readonly object _sync = new();
+        private Bitmap? _latest;
+        private TaskCompletionSource<bool>? _signal;
+        private bool _disposed;
+
+        public void Publish(Bitmap bitmap)
+        {
+            Bitmap? replaced;
+            TaskCompletionSource<bool>? signal;
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    bitmap.Dispose();
+                    return;
+                }
+                replaced = _latest;
+                _latest = bitmap;
+                signal = _signal;
+                _signal = null;
+            }
+            replaced?.Dispose();
+            signal?.TrySetResult(true);
+        }
+
+        public async Task<Bitmap?> TakeAsync(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                Task waitTask;
+                lock (_sync)
+                {
+                    if (_latest is not null)
+                    {
+                        var result = _latest;
+                        _latest = null;
+                        return result;
+                    }
+                    if (_disposed) return null;
+                    _signal ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    waitTask = _signal.Task;
+                }
+                await waitTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public void Dispose()
+        {
+            Bitmap? latest;
+            TaskCompletionSource<bool>? signal;
+            lock (_sync)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                latest = _latest;
+                _latest = null;
+                signal = _signal;
+                _signal = null;
+            }
+            latest?.Dispose();
+            signal?.TrySetResult(false);
+        }
     }
 
     private Task SendConsentAsync(string requestId, bool accepted, string message, CancellationToken cancellationToken) =>

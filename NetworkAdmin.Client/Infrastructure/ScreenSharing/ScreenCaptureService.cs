@@ -29,12 +29,13 @@ internal sealed class ScreenCaptureService
         // Capture runs on a worker thread. Give that thread the same physical-pixel
         // coordinate space as the interactive desktop before reading bounds/capturing.
         using var dpiContext = DpiAwarenessContext.EnterPerMonitorV2();
-        // Use the full virtual screen (union of all monitors) so that the captured
-        // bitmap always covers the entire desktop — not just the primary display.
-        // GetPrimaryDisplayBounds() was previously used here, which caused the server
-        // to see only the top-left portion of the desktop on multi-monitor setups or
-        // when the primary monitor's physical size differed from the virtual-screen origin.
-        var bounds = GetVirtualScreenBounds();
+        // RemoteX captures the primary display. Use EnumDisplaySettings here rather
+        // than SM_*VIRTUALSCREEN: on high-DPI laptops GetSystemMetrics can expose
+        // logical dimensions (for example 1600x1000 for a 3200x2000 panel), while
+        // BitBlt still reads the physical desktop. That mismatch produces the
+        // characteristic "only the top-left quarter is visible" result remotely.
+        // EnumDisplaySettings returns the active physical mode for the primary display.
+        var bounds = GetPrimaryDisplayBounds();
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No active screen is available for capture.");
 
@@ -204,7 +205,8 @@ internal sealed class ScreenCaptureService
 
         // RemoteX captures the primary display. EnumDisplaySettings reports its active
         // output mode (physical pixels), avoiding DPI-virtualized virtual-screen metrics.
-        return new Rectangle(0, 0, checked((int)mode.dmPelsWidth), checked((int)mode.dmPelsHeight));
+        return new Rectangle(mode.dmPositionX, mode.dmPositionY,
+            checked((int)mode.dmPelsWidth), checked((int)mode.dmPelsHeight));
     }
 
     private static void CapturePhysicalDesktop(Bitmap destination, Rectangle bounds)
