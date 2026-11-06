@@ -9,17 +9,15 @@ using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Server.Application.Interfaces;
 using NetworkAdmin.Server.Audit;
-using NetworkAdmin.Server.Infrastructure.Chat;
 
 namespace NetworkAdmin.Server.Runtime;
 
-internal sealed class ScreenStreamingService : IAsyncDisposable
+internal sealed class ScreenStreamingService : IScreenShareServerModule
 {
     private const int MaxHandshakeBytes = 8 * 1024;
     private readonly ServerOptions _options;
     private readonly ClientManager _clients;
     private readonly RemoteAdministrationAuditLog _auditLog;
-    private readonly ChatService? _chatService;
     private readonly TcpListener _listener;
     private readonly ConcurrentDictionary<string, PendingScreenShare> _requests = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PendingScreenShare> _clientSlots = new(StringComparer.OrdinalIgnoreCase);
@@ -29,13 +27,11 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     private Task? _acceptTask;
     private int _disposed;
 
-    public ScreenStreamingService(ServerOptions options, ClientManager clients, RemoteAdministrationAuditLog? auditLog = null,
-        ChatService? chatService = null)
+    public ScreenStreamingService(ServerOptions options, ClientManager clients, RemoteAdministrationAuditLog? auditLog = null)
     {
         _options = options;
         _clients = clients;
         _auditLog = auditLog ?? new RemoteAdministrationAuditLog();
-        _chatService = chatService;
         _listener = new TcpListener(options.Host, options.ScreenPort);
     }
 
@@ -48,6 +44,13 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     }
 
     public bool HasSession(string clientId) => _clientSlots.ContainsKey(clientId);
+
+    public async Task<IScreenViewerSession> RequestViewAsync(string clientId, string sessionId,
+        RemoteSessionAuthorization authorization, CancellationToken cancellationToken, Action? onConnecting = null) =>
+        await RequestAsync(clientId, sessionId, authorization, cancellationToken, onConnecting).ConfigureAwait(false);
+
+    public Task HandleMessageAsync(ClientSessionInfo session, MessageEnvelope envelope, CancellationToken cancellationToken) =>
+        HandleControlMessageAsync(session, envelope);
 
     internal bool TryGetSessionSnapshot(string clientId, out RemoteSessionSnapshot? snapshot)
     {
@@ -187,8 +190,7 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
             var stream = await pending.Stream.Task.WaitAsync(TimeSpan.FromSeconds(20), token).ConfigureAwait(false);
             pending.SetActiveStream(stream);
             pending.TryTransition(RemoteSessionState.Active, "Screen channel is active.");
-            return new ScreenViewerSession(this, pending, stream,
-                _chatService?.CreateSession(pending.Client.ClientId, pending.Client.SessionId));
+            return new ScreenViewerSession(this, pending, stream);
         }
         catch (OperationCanceledException)
         {
@@ -595,10 +597,9 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
 }
 
 internal sealed class ScreenViewerSession(ScreenStreamingService service,
-    ScreenStreamingService.PendingScreenShare pending, Stream stream, IRemoteChatSession? chat) : IScreenViewerSession
+    ScreenStreamingService.PendingScreenShare pending, Stream stream) : IScreenViewerSession
 {
     public bool IsControlActive => pending.IsControlActive;
-    public IRemoteChatSession? Chat => chat;
     private int _stopped;
 
     public async Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken)
@@ -631,7 +632,6 @@ internal sealed class ScreenViewerSession(ScreenStreamingService service,
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
-        if (chat is not null) await chat.DisposeAsync().ConfigureAwait(false);
         pending.StreamClosed.TrySetResult();
     }
 }

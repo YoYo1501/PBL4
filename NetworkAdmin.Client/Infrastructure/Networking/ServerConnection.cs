@@ -63,7 +63,7 @@ internal sealed class ServerConnection : IAsyncDisposable
             {
                 ClientId = ClientId,
                 ClientName = ClientName,
-                Capabilities = [RemoteProtocolCapabilities.RemoteSessionV1, RemoteProtocolCapabilities.RemoteChatV1]
+                Capabilities = []
             },
             cancellationToken).ConfigureAwait(false);
 

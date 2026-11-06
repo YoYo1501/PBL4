@@ -1,6 +1,7 @@
 using NetworkAdmin.Client.Infrastructure.Networking;
-using NetworkAdmin.Client.Infrastructure.ScreenSharing;
+using NetworkAdmin.Client.Application.Interfaces;
 using NetworkAdmin.Client.Infrastructure.Chat;
+using NetworkAdmin.Client.Infrastructure.ScreenSharing;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -8,7 +9,6 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Messages;
-using NetworkAdmin.Client.Application.Interfaces;
 using NetworkAdmin.Shared.Models;
 
 namespace NetworkAdmin.Client.Infrastructure.Runtime;
@@ -17,9 +17,9 @@ internal sealed class ClientCommandHandler
 {
     private readonly IPingService _pingService;
     private readonly ServerConnection _connection;
+    private readonly IClientChatSession _chatSession;
+    private readonly IClientScreenShareModule _screenShare;
     private readonly string _adminToken;
-    private readonly ClientScreenShareService? _screenShareService;
-    private readonly ClientChatService? _chatService;
     private readonly SemaphoreSlim _pingSlots = new(4, 4);
     private readonly ConcurrentDictionary<Task, byte> _runningTasks = new();
     private readonly ConcurrentDictionary<string, byte> _remoteCommandIds = new(StringComparer.OrdinalIgnoreCase);
@@ -51,15 +51,19 @@ internal sealed class ClientCommandHandler
         }
     }
 
-    public ClientCommandHandler(IPingService pingService, ServerConnection connection, string adminToken = "",
-        ClientScreenShareService? screenShareService = null, ClientChatService? chatService = null)
+    public ClientCommandHandler(IPingService pingService, ServerConnection connection, IClientChatSession chatSession,
+        IClientScreenShareModule screenShare, string adminToken = "")
     {
         _pingService = pingService;
         _connection = connection;
+        _chatSession = chatSession;
+        _screenShare = screenShare;
         _adminToken = adminToken;
-        _screenShareService = screenShareService;
-        _chatService = chatService;
     }
+
+    // Retained for validation harnesses and standalone callers without a chat presentation.
+    public ClientCommandHandler(IPingService pingService, ServerConnection connection, string adminToken = "")
+        : this(pingService, connection, new ClientChatSession(connection), NullClientScreenShareModule.Instance, adminToken) { }
 
     public void SetScanner(INetworkScannerService scannerService)
     {
@@ -68,6 +72,22 @@ internal sealed class ClientCommandHandler
 
     public async Task HandleAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
     {
+        if (envelope.Type is MessageType.ScreenShareRequest or MessageType.ScreenShareStart or MessageType.ScreenShareStop)
+        {
+            await _screenShare.HandleAsync(envelope, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (envelope.Type == MessageType.RemoteChatMessage)
+        {
+            try
+            {
+                var message = envelope.Data.Deserialize<RemoteChatMessage>(JsonOptions);
+                await _chatSession.HandleIncomingAsync(message, envelope.RequestId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (JsonException ex) { Console.WriteLine($"Malformed chat message: {ex.Message}"); }
+            return;
+        }
+
         if (envelope.Type == MessageType.PingRequest)
         {
             TrackTask(Task.Run(() => HandlePingCommandAsync(envelope, cancellationToken), CancellationToken.None));
@@ -106,48 +126,6 @@ internal sealed class ClientCommandHandler
         if (envelope.Type == MessageType.RemoteAdministrationCancel)
         {
             HandleRemoteAdministrationCancel(envelope);
-            return;
-        }
-
-        if (envelope.Type == MessageType.ScreenShareRequest && _screenShareService is not null)
-        {
-            TrackTask(Task.Run(() => _screenShareService.HandleRequestAsync(envelope, cancellationToken), CancellationToken.None));
-            return;
-        }
-
-        if (envelope.Type == MessageType.RemoteChatMessage && _chatService is not null)
-        {
-            await _chatService.HandleMessageAsync(envelope, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        if (envelope.Type == MessageType.ScreenShareStart && _screenShareService is not null)
-        {
-            TrackTask(Task.Run(() => _screenShareService.HandleStartAsync(envelope, cancellationToken), CancellationToken.None));
-            return;
-        }
-
-        if (envelope.Type == MessageType.ControlRequest && _screenShareService is not null)
-        {
-            TrackTask(Task.Run(() => _screenShareService.HandleControlRequestAsync(envelope, cancellationToken), CancellationToken.None));
-            return;
-        }
-
-        if (envelope.Type == MessageType.ControlStop)
-        {
-            _screenShareService?.HandleControlStop(envelope);
-            return;
-        }
-
-        if (envelope.Type == MessageType.ControlInputEvent)
-        {
-            _screenShareService?.HandleInputEvent(envelope);
-            return;
-        }
-
-        if (envelope.Type == MessageType.ScreenShareStop)
-        {
-            _screenShareService?.Stop();
             return;
         }
 

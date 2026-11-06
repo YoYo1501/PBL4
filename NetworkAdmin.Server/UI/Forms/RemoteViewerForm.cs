@@ -24,28 +24,17 @@ internal sealed class RemoteViewerForm : Form
     private readonly Button _actualButton = CreateToolButton("Actual size", false);
     private readonly Button _fullScreenButton = CreateToolButton("Full screen", false);
     private readonly Button _stopButton = CreateToolButton("Stop viewing", false, DashboardTheme.Red);
-    private readonly Button _requestControlButton = CreateToolButton("Request Control", true);
-    private readonly Button _stopControlButton = CreateToolButton("Stop Control", false, DashboardTheme.Red);
-    private readonly Button _chatButton = CreateToolButton("Chat", false);
-    private readonly Label _controlState = DashboardTheme.Label("CONTROL OFF", 9, true, DashboardTheme.Muted);
     private readonly ToolTip _toolTip = new();
-    private readonly System.Windows.Forms.Timer _controlStateTimer = new() { Interval = 500 };
     private readonly object _frameSync = new();
     private Bitmap? _currentBitmap;
     private RemoteViewerFrame? _pendingFrame;
     private bool _frameUpdatePosted;
     private bool _actualSize;
     private bool _fullScreen;
-    private bool _controlRequestPending;
-    private RemoteMouseButton? _pressedMouseButton;
-    private int _lastMappedX;
-    private int _lastMappedY;
-    private long _mouseMoveSentAt;
     private bool _allowClose;
     private int _closing;
     private FormBorderStyle _previousBorderStyle;
     private FormWindowState _previousWindowState;
-    private RemoteChatForm? _chatForm;
 
     public RemoteViewerForm(string clientName, string clientId, IScreenViewerSession session)
         : this(clientName, clientId, (_, _) => Task.FromResult(session)) { }
@@ -84,22 +73,16 @@ internal sealed class RemoteViewerForm : Form
         SetFitMode();
         _fullScreenButton.Click += (_, _) => ToggleFullScreen();
         _stopButton.Click += (_, _) => Close();
-        _requestControlButton.Click += async (_, _) => await RequestControlAsync();
-        _stopControlButton.Click += async (_, _) => await StopControlAsync();
-        _chatButton.Click += (_, _) => OpenChat();
-        _picture.MouseEnter += (_, _) => _picture.Focus();
-        _picture.MouseDown += (_, e) => OnPictureMouseDown(e);
-        _picture.MouseUp += (_, e) => OnPictureMouseUp(e);
-        _picture.MouseMove += (_, e) => OnPictureMouseMove(e);
-        _picture.MouseWheel += (_, e) => OnPictureMouseWheel(e);
-        _stopControlButton.Enabled = false;
-        _requestControlButton.Enabled = false;
-        _controlStateTimer.Tick += (_, _) => SyncControlState();
-        _controlStateTimer.Start();
+        KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Escape && _fullScreen)
+            {
+                ToggleFullScreen();
+                e.Handled = true;
+            }
+        };
         Shown += (_, _) => _presenter.Start();
         FormClosing += OnFormClosingAsync;
-        KeyDown += (_, e) => OnViewerKey(e, keyDown: true);
-        KeyUp += (_, e) => OnViewerKey(e, keyDown: false);
     }
 
     private void BuildLayout()
@@ -160,9 +143,6 @@ internal sealed class RemoteViewerForm : Form
         metrics.Controls.Add(_state, 0, 0);
         metrics.Controls.Add(_fps, 1, 0);
         metrics.Controls.Add(_resolution, 2, 0);
-        metrics.ColumnCount = 4;
-        metrics.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
-        metrics.Controls.Add(_controlState, 3, 0);
 
         var tools = new FlowLayoutPanel
         {
@@ -172,7 +152,7 @@ internal sealed class RemoteViewerForm : Form
             BackColor = Color.Transparent,
             Padding = new Padding(0)
         };
-        tools.Controls.AddRange([_fitButton, _actualButton, _fullScreenButton, _requestControlButton, _stopControlButton, _chatButton, _stopButton]);
+        tools.Controls.AddRange([_fitButton, _actualButton, _fullScreenButton, _stopButton]);
 
         headerGrid.Controls.Add(client, 0, 0);
         headerGrid.Controls.Add(tools, 1, 0);
@@ -209,14 +189,6 @@ internal sealed class RemoteViewerForm : Form
             if (!string.IsNullOrWhiteSpace(detail)) SetFooter(detail);
             else if (state == RemoteViewerState.Connecting) SetFooter("Screen channel connected; waiting for frames…");
             else if (state == RemoteViewerState.Disconnected) SetFooter("Screen sharing ended. The Client remains connected.");
-            _requestControlButton.Enabled = state == RemoteViewerState.Streaming && !_presenter.IsControlActive && !_controlRequestPending;
-            _chatButton.Enabled = state == RemoteViewerState.Streaming && _presenter.Chat is not null;
-            if (state is RemoteViewerState.Disconnected or RemoteViewerState.Error)
-            {
-                _stopControlButton.Enabled = false;
-                _controlState.Text = "CONTROL OFF";
-                _controlState.ForeColor = DashboardTheme.Muted;
-            }
         });
     }
 
@@ -356,102 +328,6 @@ internal sealed class RemoteViewerForm : Form
         _detail.Text = text;
     }
 
-    private void OnPictureMouseDown(MouseEventArgs e)
-    {
-        _picture.Focus();
-        if (!_presenter.IsControlActive || !TryMapToNormalized(e.Location, out var x, out var y)) return;
-        var button = e.Button switch
-        {
-            MouseButtons.Left => RemoteMouseButton.Left,
-            MouseButtons.Right => RemoteMouseButton.Right,
-            MouseButtons.Middle => RemoteMouseButton.Middle,
-            _ => (RemoteMouseButton)0
-        };
-        if (button != 0)
-        {
-            _pressedMouseButton = button;
-            _lastMappedX = x;
-            _lastMappedY = y;
-            QueueInput(RemoteInputEventKind.MouseDown, x, y, button, 0, 0);
-        }
-    }
-
-    private void OnPictureMouseUp(MouseEventArgs e)
-    {
-        if (_pressedMouseButton is not { } button) return;
-        if (!_presenter.IsControlActive)
-        {
-            _pressedMouseButton = null;
-            return;
-        }
-        if (TryMapToNormalized(e.Location, out var x, out var y))
-        {
-            _lastMappedX = x;
-            _lastMappedY = y;
-        }
-        else
-        {
-            x = _lastMappedX;
-            y = _lastMappedY;
-        }
-        _pressedMouseButton = null;
-        QueueInput(RemoteInputEventKind.MouseUp, x, y, button, 0, 0);
-    }
-
-    private void OnPictureMouseMove(MouseEventArgs e)
-    {
-        if (!_presenter.IsControlActive || !TryMapToNormalized(e.Location, out var x, out var y)) return;
-        var now = Stopwatch.GetTimestamp();
-        if (_mouseMoveSentAt != 0 && Stopwatch.GetElapsedTime(_mouseMoveSentAt, now) < TimeSpan.FromMilliseconds(16)) return;
-        _mouseMoveSentAt = now;
-        _lastMappedX = x;
-        _lastMappedY = y;
-        QueueInput(RemoteInputEventKind.MouseMove, x, y, 0, 0, 0);
-    }
-
-    private void OnPictureMouseWheel(MouseEventArgs e)
-    {
-        if (_presenter.IsControlActive && TryMapToNormalized(e.Location, out var x, out var y) && e.Delta != 0)
-            QueueInput(RemoteInputEventKind.MouseWheel, x, y, 0, Math.Clamp(e.Delta, -1200, 1200), 0);
-    }
-
-    private void OnViewerKey(KeyEventArgs e, bool keyDown)
-    {
-        if (keyDown && e.KeyCode == Keys.Escape && _fullScreen)
-        {
-            ToggleFullScreen();
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return;
-        }
-        if (!_presenter.IsControlActive || !_picture.Focused || e.KeyValue is < 1 or > 255) return;
-        QueueInput(keyDown ? RemoteInputEventKind.KeyDown : RemoteInputEventKind.KeyUp,
-            0, 0, 0, 0, e.KeyValue);
-        e.Handled = true;
-        if (keyDown) e.SuppressKeyPress = true;
-    }
-
-    private bool TryMapToNormalized(Point point, out int x, out int y)
-    {
-        x = y = 0;
-        var image = _currentBitmap;
-        return image is not null && TryMapToNormalized(point, _picture.ClientSize, image.Size, _picture.SizeMode, out x, out y);
-    }
-
-    internal static bool TryMapToNormalized(Point point, Size viewport, Size image, PictureBoxSizeMode mode,
-        out int x, out int y)
-    {
-        x = y = 0;
-        if (viewport.Width <= 0 || viewport.Height <= 0) return false;
-        var displayed = CalculateDisplayedImageBounds(viewport, image, mode);
-        var imageX = point.X - displayed.X;
-        var imageY = point.Y - displayed.Y;
-        if (displayed.IsEmpty || imageX < 0 || imageY < 0 || imageX >= displayed.Width || imageY >= displayed.Height) return false;
-        x = Math.Clamp((int)Math.Round(imageX / displayed.Width * RemoteInputEventPolicy.MaxCoordinate), 0, RemoteInputEventPolicy.MaxCoordinate);
-        y = Math.Clamp((int)Math.Round(imageY / displayed.Height * RemoteInputEventPolicy.MaxCoordinate), 0, RemoteInputEventPolicy.MaxCoordinate);
-        return true;
-    }
-
     internal static RectangleF CalculateDisplayedImageBounds(Size viewport, Size image, PictureBoxSizeMode mode)
     {
         if (viewport.Width <= 0 || viewport.Height <= 0 || image.Width <= 0 || image.Height <= 0)
@@ -468,99 +344,6 @@ internal sealed class RemoteViewerForm : Form
         return new RectangleF(0, 0, image.Width, image.Height);
     }
 
-    private void QueueInput(RemoteInputEventKind kind, int x, int y, RemoteMouseButton button, int wheelDelta, int virtualKeyCode) =>
-        _ = SendInputEventAsync(kind, x, y, button, wheelDelta, virtualKeyCode);
-
-    private async Task SendInputEventAsync(RemoteInputEventKind kind, int x, int y,
-        RemoteMouseButton button, int wheelDelta, int virtualKeyCode)
-    {
-        try { await _presenter.SendInputEventAsync(kind, x, y, button, wheelDelta, virtualKeyCode); }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { SetFooter($"Remote input was not sent: {ex.GetBaseException().Message}"); }
-    }
-
-    private async Task RequestControlAsync()
-    {
-        if (!_requestControlButton.Enabled) return;
-        _controlRequestPending = true;
-        _requestControlButton.Enabled = false;
-        _controlState.Text = "WAITING FOR CLIENT";
-        _controlState.ForeColor = DashboardTheme.Blue;
-        try
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(65));
-            var accepted = await _presenter.RequestControlAsync(timeout.Token);
-            _controlState.Text = accepted ? "ACTIVE" : "CONTROL REJECTED";
-            _controlState.ForeColor = accepted ? DashboardTheme.Green : DashboardTheme.Muted;
-            _stopControlButton.Enabled = accepted;
-            _requestControlButton.Enabled = !accepted && _presenter.State == RemoteViewerState.Streaming;
-            SetFooter(accepted
-                ? "Client approved control. Use the viewer to send mouse and keyboard input; Stop Control revokes access."
-                : "Client rejected the control request.");
-        }
-        catch (Exception ex)
-        {
-            _controlState.Text = "CONTROL UNAVAILABLE";
-            _controlState.ForeColor = DashboardTheme.Red;
-            _requestControlButton.Enabled = _presenter.State == RemoteViewerState.Streaming;
-            SetFooter($"Control request failed: {ex.GetBaseException().Message}");
-        }
-        finally
-        {
-            _controlRequestPending = false;
-            if (!_presenter.IsControlActive && _presenter.State == RemoteViewerState.Streaming)
-                _requestControlButton.Enabled = true;
-        }
-    }
-
-    private void OpenChat()
-    {
-        var chat = _presenter.Chat;
-        if (chat is null || _chatForm is { IsDisposed: false })
-        {
-            _chatForm?.BringToFront();
-            return;
-        }
-
-        var form = new RemoteChatForm(_clientName, chat.SendAsync);
-        Action<RemoteChatMessage> onMessage = form.AppendMessage;
-        chat.MessageReceived += onMessage;
-        form.FormClosed += (_, _) =>
-        {
-            chat.MessageReceived -= onMessage;
-            if (ReferenceEquals(_chatForm, form)) _chatForm = null;
-        };
-        _chatForm = form;
-        form.Show(this);
-    }
-
-    private async Task StopControlAsync()
-    {
-        _stopControlButton.Enabled = false;
-        try { await _presenter.StopControlAsync(); }
-        catch (Exception ex) { SetFooter($"Stop control failed: {ex.GetBaseException().Message}"); }
-        _pressedMouseButton = null;
-        _controlState.Text = "CONTROL OFF";
-        _controlState.ForeColor = DashboardTheme.Muted;
-        _requestControlButton.Enabled = _presenter.State == RemoteViewerState.Streaming;
-        SetFooter("Remote control stopped. Screen viewing continues.");
-    }
-
-    private void SyncControlState()
-    {
-        if (IsDisposed) return;
-        var active = _presenter.IsControlActive;
-        if (!active && _controlState.Text.StartsWith("ACTIVE", StringComparison.Ordinal))
-        {
-            _pressedMouseButton = null;
-            _controlState.Text = "CONTROL OFF";
-            _controlState.ForeColor = DashboardTheme.Muted;
-            _stopControlButton.Enabled = false;
-            _requestControlButton.Enabled = true;
-            SetFooter("Client stopped remote control. Screen viewing continues.");
-        }
-    }
-
     private void PostToUi(Action action)
     {
         if (IsDisposed || !IsHandleCreated) return;
@@ -575,7 +358,6 @@ internal sealed class RemoteViewerForm : Form
         if (Interlocked.Exchange(ref _closing, 1) != 0) return;
         _stopButton.Enabled = false;
         _stopButton.Text = "Stopping…";
-        _chatForm?.Close();
         try { await _presenter.DisposeAsync(); }
         catch (Exception ex) { SetFooter($"Cleanup: {ex.Message}"); }
         _presenter.StateChanged -= OnStateChanged;
@@ -588,7 +370,6 @@ internal sealed class RemoteViewerForm : Form
     {
         if (disposing)
         {
-            _controlStateTimer.Dispose();
             lock (_frameSync)
             {
                 _pendingFrame?.Image.Dispose();

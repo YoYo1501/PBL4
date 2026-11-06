@@ -12,7 +12,7 @@ internal sealed class ServerDashboardForm : Form
     private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 500 };
     private readonly CancellationTokenSource _lifetime = new();
     private readonly HashSet<string> _knownAgents = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _openScreenViewers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _openingScreenClients = new(StringComparer.OrdinalIgnoreCase);
     private readonly ComboBox _selector = new()
     {
         Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
@@ -58,6 +58,7 @@ internal sealed class ServerDashboardForm : Form
     private readonly PingView _dashboardPing = new(false);
     private readonly PingView _pingPage = new(true);
     private readonly Button _agentInfoButton = DashboardTheme.Button("Get Agent Info");
+    private readonly Button _chatButton = DashboardTheme.Button("Open Chat");
     private readonly Button _viewScreenButton = DashboardTheme.Button("View Screen");
     private readonly Label _agentInfoStatus = DashboardTheme.Label("No remote command executed for this session.", 9, color: DashboardTheme.Muted);
     private readonly Button _shutdownButton = DashboardTheme.Button("Shutdown", false);
@@ -103,7 +104,6 @@ internal sealed class ServerDashboardForm : Form
     private bool _updating;
     private bool _closing;
     private bool _closed;
-    private bool _screenRequestPending;
     private Task? _pingTask;
     private Task? _scanTask;
     private Task? _agentInfoTask;
@@ -177,7 +177,8 @@ internal sealed class ServerDashboardForm : Form
         _pingPage.PingButton.Click += (_, _) => _pingTask = PingAsync();
         _scanner.ScanButton.Click += (_, _) => _scanTask = ScanAsync();
         _agentInfoButton.Click += (_, _) => _agentInfoTask = GetAgentInfoAsync();
-        _viewScreenButton.Click += async (_, _) => await OpenScreenViewerAsync();
+        _chatButton.Click += (_, _) => _ = OpenChatAsync();
+        _viewScreenButton.Click += (_, _) => OpenScreenViewer();
         _autoDisconnectButton.Click += (_, _) => ToggleAutoDisconnect();
         _shutdownButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Shutdown);
         _restartButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Restart);
@@ -291,32 +292,35 @@ internal sealed class ServerDashboardForm : Form
         page.Controls.Add(fleet, 0, 0); page.Controls.Add(_clientsDetail, 0, 1);
         var adapters = new DashboardCard("All Reported Interfaces / Physical and virtual adapters"); adapters.Body.Controls.Add(_interfaces);
         page.Controls.Add(adapters, 0, 2);
-        var remote = new DashboardCard("Remote Administration and Screen Viewer");
+        var remote = new DashboardCard("Remote Administration");
         var remoteRows = DashboardTheme.Rows(38, 30, 30, 34, 30);
-        var remoteActions = DashboardTheme.Table(6, 1);
-        foreach (var width in new[] { 130, 155, 125, 125, 105, 120 })
+        var remoteActions = DashboardTheme.Table(5, 1);
+        foreach (var width in new[] { 155, 125, 125, 105, 120 })
             remoteActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
-        remoteActions.Controls.Add(_viewScreenButton, 0, 0);
-        remoteActions.Controls.Add(_agentInfoButton, 1, 0);
-        remoteActions.Controls.Add(_shutdownButton, 2, 0);
-        remoteActions.Controls.Add(_restartButton, 3, 0);
-        remoteActions.Controls.Add(_cancelPowerButton, 4, 0);
+        remoteActions.Controls.Add(_agentInfoButton, 0, 0);
+        remoteActions.Controls.Add(_shutdownButton, 1, 0);
+        remoteActions.Controls.Add(_restartButton, 2, 0);
+        remoteActions.Controls.Add(_cancelPowerButton, 3, 0);
         var countdown = DashboardTheme.Table(2, 1);
         countdown.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));
         countdown.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         countdown.Controls.Add(DashboardTheme.Label("Delay (s)", 8, color: DashboardTheme.Muted), 0, 0);
         countdown.Controls.Add(_powerCountdown, 1, 0);
-        remoteActions.Controls.Add(countdown, 5, 0);
+        remoteActions.Controls.Add(countdown, 4, 0);
         remoteRows.Controls.Add(remoteActions, 0, 0);
         remoteRows.Controls.Add(_agentInfoStatus, 0, 1);
         remoteRows.Controls.Add(_powerStatus, 0, 2);
-        var lockActions = DashboardTheme.Table(3, 1);
+        var lockActions = DashboardTheme.Table(5, 1);
         lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
+        lockActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 115));
         lockActions.Controls.Add(_lockButton, 0, 0);
         lockActions.Controls.Add(_unlockButton, 1, 0);
         lockActions.Controls.Add(_lockMode, 2, 0);
+        lockActions.Controls.Add(_chatButton, 3, 0);
+        lockActions.Controls.Add(_viewScreenButton, 4, 0);
         remoteRows.Controls.Add(lockActions, 0, 3);
         remoteRows.Controls.Add(_lockStatus, 0, 4);
         remote.Body.Controls.Add(remoteRows);
@@ -462,12 +466,12 @@ internal sealed class ServerDashboardForm : Form
         var samples = _presenter.TelemetryFor(c?.ClientId);
         _dashboardTelemetry.UpdateClient(c, samples); _monitoringTelemetry.UpdateClient(c, samples);
         var enabled = c?.Connected == true && _runtime.IsRunning && !_closing;
-        var viewerOpen = c is not null && _openScreenViewers.Contains(c.ClientId);
-        _viewScreenButton.Enabled = enabled && !_screenRequestPending && !viewerOpen && (c is null || !_runtime.IsScreenSharing(c.ClientId));
-        _viewScreenButton.Text = c is not null && (_runtime.IsScreenSharing(c.ClientId) || viewerOpen) ? "Screen active" : "View Screen";
         _dashboardPing.SetBusy(enabled && !state.PingPending, state.PingPending); _pingPage.SetBusy(enabled && !state.PingPending, state.PingPending);
         _scanner.SetAgent(c, enabled && !state.ScanPending, state.ScanPending); _dashboardScan.SetAgent(c, enabled && !state.ScanPending, state.ScanPending);
         _agentInfoButton.Enabled = enabled && !state.RemoteInfoPending;
+        _chatButton.Enabled = enabled;
+        _viewScreenButton.Enabled = enabled && c is not null &&
+            !_runtime.IsScreenSharing(c.ClientId) && !_openingScreenClients.Contains(c.ClientId);
         _agentInfoButton.Text = state.RemoteInfoPending ? "Reading..." : "Get Agent Info";
         _agentInfoStatus.Text = state.RemoteInfoStatus;
         _agentInfoStatus.ForeColor = state.RemoteInfoError ? DashboardTheme.Red : DashboardTheme.Muted;
@@ -620,41 +624,6 @@ internal sealed class ServerDashboardForm : Form
     {
         _dashboardPing.SetStatus(status, error); _pingPage.SetStatus(status, error);
     }
-    private async Task OpenScreenViewerAsync()
-    {
-        var client = Selected;
-        if (client is null || !client.Connected || _closing || _screenRequestPending) return;
-
-        _screenRequestPending = true;
-        _viewScreenButton.Enabled = false;
-        _viewScreenButton.Text = "Requesting...";
-        try
-        {
-            var viewer = new RemoteViewerForm(client.Hostname, client.ClientId,
-                async (token, onConnecting) => await _presenter.RequestScreenAsync(
-                    client.ClientId, client.SessionId, token, onConnecting).ConfigureAwait(false));
-            _openScreenViewers.Add(client.ClientId);
-            viewer.FormClosed += (_, _) =>
-            {
-                _openScreenViewers.Remove(client.ClientId);
-                if (!_closing) RenderSelection();
-            };
-            viewer.Show(this);
-        }
-        catch (OperationCanceledException) when (_closing) { }
-        catch (Exception ex)
-        {
-            _openScreenViewers.Remove(client.ClientId);
-            if (!_closing)
-                MessageBox.Show(this, ex.Message, "Screen sharing", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        finally
-        {
-            _screenRequestPending = false;
-            if (!_closing) RenderSelection();
-        }
-    }
-
     private async Task PingAsync()
     {
         var client = Selected;
@@ -677,6 +646,49 @@ internal sealed class ServerDashboardForm : Form
         await _presenter.ScanAsync(client, subnet, (int)_scanner.TimeoutInput.Value,
             _lifetime.Token, () => _closing, RenderSelection, RefreshState);
     }
+    private Task OpenChatAsync()
+    {
+        var client = Selected;
+        if (client is null || !client.Connected) return Task.CompletedTask;
+        IRemoteChatSession? chat = null;
+        try
+        {
+            chat = _runtime.OpenChatSession(client.ClientId, client.SessionId);
+            var form = new RemoteChatForm(client.Hostname, chat.SendAsync);
+            Action<RemoteChatMessage> onMessage = form.AppendMessage;
+            chat.MessageReceived += onMessage;
+            form.FormClosed += (_, _) =>
+            {
+                chat.MessageReceived -= onMessage;
+                _ = chat.DisposeAsync();
+            };
+            form.Show(this);
+        }
+        catch (Exception ex)
+        {
+            if (chat is not null) _ = chat.DisposeAsync();
+            MessageBox.Show(this, $"Unable to open chat: {ex.GetBaseException().Message}",
+                "NetworkAdmin Chat", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        return Task.CompletedTask;
+    }
+
+    private void OpenScreenViewer()
+    {
+        var client = Selected;
+        if (client?.Connected != true || !_openingScreenClients.Add(client.ClientId)) return;
+        var sessionId = client.SessionId;
+        var form = new RemoteViewerForm(client.Hostname, client.ClientId,
+            (token, onConnecting) => _runtime.RequestScreenAsync(client.ClientId, sessionId, token, onConnecting));
+        form.FormClosed += (_, _) =>
+        {
+            _openingScreenClients.Remove(client.ClientId);
+            RefreshState();
+        };
+        form.Show(this);
+        RenderSelection();
+    }
+
     private async Task GetAgentInfoAsync()
     {
         var client = Selected;
