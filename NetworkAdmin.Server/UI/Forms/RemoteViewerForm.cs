@@ -31,10 +31,14 @@ internal sealed class RemoteViewerForm : Form
     private bool _frameUpdatePosted;
     private bool _actualSize;
     private bool _fullScreen;
+    private bool _previousActualSize;
     private bool _allowClose;
     private int _closing;
     private FormBorderStyle _previousBorderStyle;
     private FormWindowState _previousWindowState;
+    private Padding _previousRootPadding;
+    private Rectangle _previousBounds;
+    private bool _previousTopMost;
 
     public RemoteViewerForm(string clientName, string clientId, IScreenViewerSession session)
         : this(clientName, clientId, (_, _) => Task.FromResult(session)) { }
@@ -75,10 +79,17 @@ internal sealed class RemoteViewerForm : Form
         _stopButton.Click += (_, _) => Close();
         KeyDown += (_, e) =>
         {
-            if (e.KeyCode == Keys.Escape && _fullScreen)
+            if (_fullScreen && e.KeyCode is Keys.Escape or Keys.F11)
             {
                 ToggleFullScreen();
                 e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            else if (!_fullScreen && e.KeyCode == Keys.F11)
+            {
+                ToggleFullScreen();
+                e.Handled = true;
+                e.SuppressKeyPress = true;
             }
         };
         Shown += (_, _) => _presenter.Start();
@@ -305,22 +316,44 @@ internal sealed class RemoteViewerForm : Form
         {
             _previousBorderStyle = FormBorderStyle;
             _previousWindowState = WindowState;
+            _previousBounds = Bounds;
+            _previousTopMost = TopMost;
+            _previousRootPadding = _rootLayout!.Padding;
+            _previousActualSize = _actualSize;
+            SetFitMode();
+            _rootLayout.Padding = Padding.Empty;
             _rootLayout!.RowStyles[0].Height = 0;
+            _rootLayout.RowStyles[1].SizeType = SizeType.Percent;
+            _rootLayout.RowStyles[1].Height = 100;
+            _rootLayout.RowStyles[2].Height = 0;
             _headerPanel!.Visible = false;
+            _detail.Visible = false;
+            TopMost = true;
             FormBorderStyle = FormBorderStyle.None;
-            WindowState = FormWindowState.Maximized;
+            WindowState = FormWindowState.Normal;
+            Bounds = Screen.FromControl(this).Bounds;
             _rootLayout.PerformLayout();
-            _fullScreenButton.Text = "Exit full screen";
             _fullScreen = true;
+            _picture.SizeMode = PictureBoxSizeMode.StretchImage;
+            _canvas.Focus();
             return;
         }
+        TopMost = _previousTopMost;
         FormBorderStyle = _previousBorderStyle;
-        WindowState = _previousWindowState == FormWindowState.Minimized ? FormWindowState.Normal : _previousWindowState;
+        Bounds = _previousBounds;
+        WindowState = _previousWindowState;
+        _rootLayout!.Padding = _previousRootPadding;
         _rootLayout!.RowStyles[0].Height = 116;
+        _rootLayout.RowStyles[1].SizeType = SizeType.Percent;
+        _rootLayout.RowStyles[1].Height = 100;
+        _rootLayout.RowStyles[2].Height = 30;
         _headerPanel!.Visible = true;
+        _detail.Visible = true;
         _rootLayout.PerformLayout();
-        _fullScreenButton.Text = "Full screen";
         _fullScreen = false;
+        if (_previousActualSize) SetActualSizeMode();
+        else SetFitMode();
+        _fullScreenButton.Focus();
     }
 
     private void SetFooter(string text)

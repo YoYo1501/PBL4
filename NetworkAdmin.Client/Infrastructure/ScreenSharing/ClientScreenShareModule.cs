@@ -219,14 +219,26 @@ internal sealed class ClientScreenShareModule : IClientScreenShareModule
     private async Task CaptureAndSendAsync(Stream stream, CancellationToken token)
     {
         var frameInterval = TimeSpan.FromSeconds(1d / _options.ScreenMaxFps);
+        using var captureCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        using var latestFrame = new LatestCapturedFrame();
+        var captureTask = CaptureLatestFramesAsync(latestFrame, frameInterval, captureCancellation.Token);
         Bitmap? previous = null;
         long sequence = 0;
         try
         {
             while (!token.IsCancellationRequested)
             {
-                var started = Stopwatch.GetTimestamp();
-                var current = await Task.Run(() => _capture.Capture(token), token).ConfigureAwait(false);
+                if (captureTask.IsFaulted || (captureTask.IsCompleted && !captureCancellation.IsCancellationRequested))
+                    await captureTask.ConfigureAwait(false);
+                var captured = await Task.Run(() => latestFrame.CloneLatest(token), token).ConfigureAwait(false);
+                using var current = captured.Image;
+                if (current is null)
+                {
+                    await Task.Delay(frameInterval, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                Bitmap? sentSnapshot = null;
                 try
                 {
                     var packet = await Task.Run(() => _capture.CreatePacket(current, previous, sequence, token), token)
@@ -235,18 +247,79 @@ internal sealed class ClientScreenShareModule : IClientScreenShareModule
                     {
                         await ScreenFrameProtocol.WriteFrameAsync(stream, frame, token).ConfigureAwait(false);
                         sequence++;
+                        sentSnapshot = (Bitmap)current.Clone();
                     }
-                    previous?.Dispose();
-                    previous = current;
-                    current = null!;
                 }
-                finally { current?.Dispose(); }
-
-                var remaining = frameInterval - Stopwatch.GetElapsedTime(started);
-                if (remaining > TimeSpan.Zero) await Task.Delay(remaining, token).ConfigureAwait(false);
+                finally
+                {
+                    if (sentSnapshot is not null)
+                    {
+                        previous?.Dispose();
+                        previous = sentSnapshot;
+                    }
+                }
+                await Task.Delay(frameInterval, token).ConfigureAwait(false);
             }
         }
-        finally { previous?.Dispose(); }
+        finally
+        {
+            await captureCancellation.CancelAsync().ConfigureAwait(false);
+            try { await captureTask.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (captureCancellation.IsCancellationRequested) { }
+            previous?.Dispose();
+        }
+    }
+
+    private async Task CaptureLatestFramesAsync(LatestCapturedFrame latest, TimeSpan interval,
+        CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var started = Stopwatch.GetTimestamp();
+            var frame = await Task.Run(() => _capture.Capture(token), token).ConfigureAwait(false);
+            latest.Publish(frame);
+            var remaining = interval - Stopwatch.GetElapsedTime(started);
+            if (remaining > TimeSpan.Zero) await Task.Delay(remaining, token).ConfigureAwait(false);
+        }
+    }
+
+    private sealed class LatestCapturedFrame : IDisposable
+    {
+        private readonly object _sync = new();
+        private Bitmap? _bitmap;
+        private long _sequence;
+        private long _lastSentSequence = -1;
+
+        public (Bitmap? Image, long Sequence) CloneLatest(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                if (_bitmap is null || _sequence == _lastSentSequence) return (null, _sequence);
+                _lastSentSequence = _sequence;
+                return ((Bitmap)_bitmap.Clone(), _sequence);
+            }
+        }
+
+        public void Publish(Bitmap bitmap)
+        {
+            lock (_sync)
+            {
+                var previous = _bitmap;
+                _bitmap = bitmap;
+                _sequence++;
+                previous?.Dispose();
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_sync)
+            {
+                _bitmap?.Dispose();
+                _bitmap = null;
+            }
+        }
     }
 
     private async Task SendConsentAsync(string requestId, bool accepted, string message, CancellationToken token) =>
