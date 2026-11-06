@@ -1,8 +1,10 @@
 using System.Drawing.Imaging;
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using NetworkAdmin.Shared.Protocol;
+using NetworkAdmin.Shared.Diagnostics;
 
 namespace NetworkAdmin.Client.Infrastructure.ScreenSharing;
 
@@ -15,12 +17,15 @@ internal sealed class ScreenCaptureService
     private readonly int _maxWidth;
     private readonly int _maxHeight;
     private readonly long _jpegQuality;
+    private readonly ScreenSharePerformanceMonitor? _performance;
 
-    public ScreenCaptureService(int maxWidth = 3840, int maxHeight = 2160, int jpegQuality = 70)
+    public ScreenCaptureService(int maxWidth = 3840, int maxHeight = 2160, int jpegQuality = 70,
+        ScreenSharePerformanceMonitor? performance = null)
     {
         _maxWidth = Math.Clamp(maxWidth, 640, 3840);
         _maxHeight = Math.Clamp(maxHeight, 480, 2160);
         _jpegQuality = Math.Clamp(jpegQuality, 30, 85);
+        _performance = performance;
     }
 
     public Bitmap CaptureBitmap(CancellationToken cancellationToken = default)
@@ -98,7 +103,9 @@ internal sealed class ScreenCaptureService
         }
         if (ReferenceEquals(previous, current)) return null;
 
+        var deltaStarted = Stopwatch.GetTimestamp();
         var changed = FindChangeBounds(previous, current, cancellationToken);
+        _performance?.Delta(Stopwatch.GetTimestamp() - deltaStarted);
         if (changed.IsEmpty) return null;
         var areaRatio = (double)changed.Width * changed.Height / ((double)current.Width * current.Height);
         if (areaRatio > FullFrameThreshold)
@@ -321,12 +328,15 @@ internal sealed class ScreenCaptureService
 
     private byte[] EncodeJpeg(Image image)
     {
+        var started = Stopwatch.GetTimestamp();
         using var output = new MemoryStream();
         using var parameters = new EncoderParameters(1);
         parameters.Param[0] = new EncoderParameter(Encoder.Quality, _jpegQuality);
         image.Save(output, JpegEncoder, parameters);
         if (output.Length is <= 0 or > ScreenFrameProtocol.MaxFrameBytes)
             throw new InvalidDataException("Captured JPEG exceeds the screen frame size limit.");
-        return output.ToArray();
+        var bytes = output.ToArray();
+        _performance?.Jpeg(Stopwatch.GetTimestamp() - started);
+        return bytes;
     }
 }
