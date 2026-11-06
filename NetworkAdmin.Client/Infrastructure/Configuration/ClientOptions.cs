@@ -14,6 +14,7 @@ internal sealed class ClientOptions
     public int ScreenJpegQuality { get; init; } = 70;
     public int ScreenMaxWidth { get; init; } = 3840;
     public int ScreenMaxHeight { get; init; } = 2160;
+    public bool ScreenV2Enabled => ScreenShareV2Configuration.IsEnabled;
 
     public static ClientOptions Load(string[] args)
     {

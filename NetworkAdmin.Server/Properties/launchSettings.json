@@ -2,6 +2,9 @@
   "profiles": {
     "NetworkAdmin.Server": {
       "commandName": "Project",
+      "environmentVariables": {
+        "NETWORKADMIN_SCREEN_V2": "true"
+      },
       "commandLineArgs": "--host 172.31.99.131 --port 5000 --screen-port 5001 --admin-token abc123"
     }
   }
