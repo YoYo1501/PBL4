@@ -2,15 +2,20 @@ namespace NetworkAdmin.Server.Application.Interfaces;
 
 public interface IServerRuntime
 {
+    event Action<RemoteChatMessage>? ChatMessageReceived;
+    event Action<SecurityAlertMessage>? SecurityAlertReceived;
     string Endpoint { get; }
     string SecurityFingerprint { get; }
     string Status { get; }
     bool IsRunning { get; }
+    bool AutoDisconnectEnabled { get; }
     void Start();
     Task StopAsync();
+    bool SetAutoDisconnectEnabled(bool enabled);
     Task<IScreenViewerSession> RequestScreenAsync(string clientId, string sessionId, CancellationToken token,
         Action? onConnecting = null);
     bool IsScreenSharing(string clientId);
+    Task SendChatAsync(string clientId, string sessionId, string content, CancellationToken token);
     Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token);
     IReadOnlyList<ClientSnapshot> GetClients();
     Task<PingResult> PingAsync(string sessionId, string target, CancellationToken token);

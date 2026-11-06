@@ -9,11 +9,12 @@ using NetworkAdmin.Server;
 
 internal sealed class TestClientFixture
 {
-    public ServerOptions ServerOptions(IPAddress host, int port, string adminToken = "", TimeSpan? screenConsentTimeout = null,
+    public ServerOptions ServerOptions(IPAddress host, int port, string adminToken = "test-admin-token", TimeSpan? screenConsentTimeout = null,
         X509Certificate2? tlsCertificate = null) => new()
     {
         Host = host, Port = port, ScreenPort = ReservePort(),
         AdminToken = adminToken,
+        AdminId = "test-admin",
         ScreenConsentTimeout = screenConsentTimeout ?? TimeSpan.FromSeconds(60),
         TlsCertificate = tlsCertificate
     };

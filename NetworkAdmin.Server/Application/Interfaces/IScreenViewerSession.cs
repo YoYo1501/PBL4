@@ -6,6 +6,7 @@ namespace NetworkAdmin.Server.Application.Interfaces;
 public interface IScreenViewerSession : IAsyncDisposable
 {
     bool IsControlActive { get; }
+    IRemoteChatSession? Chat => null;
     Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken);
     async Task<ScreenFramePacket?> ReadScreenFrameAsync(CancellationToken cancellationToken)
     {

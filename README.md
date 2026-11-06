@@ -93,6 +93,21 @@ Client tự kết nối và reconnect. Trong dashboard Server, chọn Client Onl
 Screen sharing captures the primary display up to 3840×2160. It targets 20 FPS and follows RemoteX's 16×16 change-block detection: small changes are sent as JPEG deltas, and larger changes are sent as full frames. Configure the Client with `--screen-fps` (1–20), `--screen-jpeg-quality` (30–85), `--screen-max-width` (640–3840) and `--screen-max-height` (480–2160), or the corresponding `NETWORKADMIN_SCREEN_FPS`, `NETWORKADMIN_SCREEN_JPEG_QUALITY`, `NETWORKADMIN_SCREEN_MAX_WIDTH` and `NETWORKADMIN_SCREEN_MAX_HEIGHT` variables.
 
 Chỉ mở inbound TCP 5000 và 5001 cho Private network profile và máy trong LAN demo. Đặt cùng `NETWORKADMIN_ADMIN_TOKEN` ở hai đầu để bảo vệ các lệnh quản trị nhạy cảm ở tầng ứng dụng; token này không được mã hóa khi dùng chế độ TCP demo.
+
+### Security monitoring, Sysmon và ONNX
+
+PBL4 không tự động cài Sysmon, Winlogbeat, driver hoặc Windows service. Nếu quản trị viên đã cài Sysmon theo policy, có thể kiểm tra log bằng PowerShell Administrator:
+
+```powershell
+Sysmon64.exe -accepteula -i C:\Security\sysmonconfig.xml
+Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -MaxEvents 5
+```
+
+Không chạy lệnh cài/gỡ nếu chưa được phê duyệt. Gỡ cài đặt dùng `Sysmon64.exe -u` và cũng cần quyền quản trị. Collector PBL4 mặc định đọc `Microsoft-Windows-Sysmon/Operational`; nguồn NDJSON có thể cấu hình bằng `--security-source Ndjson`, `--security-ndjson-directory`, `--security-ndjson-pattern` và `--security-checkpoint`, hoặc các biến `NETWORKADMIN_SECURITY_*` tương ứng. Xem [docs/remote-test-plan.md](docs/remote-test-plan.md) để biết đầy đủ tham số và checklist.
+
+Model AI không tải từ mạng và không được thay bằng model giả. Các artifact thật phải nằm trong `NetworkAdmin.Client/Assets/SecurityModel/` và được copy cạnh executable: ONNX model, feature metadata, label encoders, TF-IDF files, scaler và ONNX metadata. Contract là input `float_input` `[1,69]`, outputs `label`/`scores`; anomaly score không phải xác suất. Nếu artifact thiếu hoặc tensor sai, loader fail-closed. Pipeline hiện được kiểm tra bằng test/artifact contract; assets tồn tại không tự động bật collector hoặc inference.
+
+Test plan, kết quả build/test, hướng dẫn manual với Server/Admin/2 Clients và giới hạn benchmark nằm tại [docs/remote-test-plan.md](docs/remote-test-plan.md).
 ### Kiểm thử Remote Administration an toàn
 
 Server console hỗ trợ lệnh chỉ đọc `remote-info <clientId>`. Lệnh này dùng

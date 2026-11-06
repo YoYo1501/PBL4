@@ -29,4 +29,50 @@ public sealed class ScreenCapturePipelineTests
         Assert.True(keyframe.Value.IsFullFrame);
         Assert.Equal((64, 64), (keyframe.Value.Width, keyframe.Value.Height));
     }
+
+    [Fact]
+    public void Create_packet_honors_cancellation_before_pixel_processing()
+    {
+        var capture = new ScreenCaptureService();
+        using var previous = new Bitmap(64, 64);
+        using var current = new Bitmap(64, 64);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => capture.CreatePacket(
+            current, previous, sequence: 1, cancellationToken: cancellation.Token));
+    }
+
+    [Fact]
+    public void Try_create_packet_treats_stop_cancellation_as_a_normal_result()
+    {
+        var capture = new ScreenCaptureService();
+        using var previous = new Bitmap(64, 64);
+        using var current = new Bitmap(64, 64);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var completed = capture.TryCreatePacket(current, previous, sequence: 1,
+            forceFullFrame: false, cancellationToken: cancellation.Token, out var packet);
+
+        Assert.False(completed);
+        Assert.Null(packet);
+    }
+
+    [Fact]
+    public void Encoded_packet_is_independent_from_source_bitmaps_after_cleanup()
+    {
+        var capture = new ScreenCaptureService(jpegQuality: 70);
+        byte[] jpeg;
+        using (var previous = new Bitmap(64, 64))
+        using (var current = new Bitmap(64, 64))
+        {
+            using (var graphics = Graphics.FromImage(current)) graphics.Clear(Color.DarkGreen);
+            jpeg = capture.CreatePacket(current, previous, sequence: 1, forceFullFrame: true)!.Value.Jpeg;
+        }
+
+        Assert.NotEmpty(jpeg);
+        Assert.Equal((byte)0xFF, jpeg[0]);
+        Assert.Equal((byte)0xD8, jpeg[1]);
+    }
 }

@@ -8,6 +8,8 @@ using System.Security.Cryptography.X509Certificates;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Server.Application.Interfaces;
+using NetworkAdmin.Server.Audit;
+using NetworkAdmin.Server.Infrastructure.Chat;
 
 namespace NetworkAdmin.Server.Runtime;
 
@@ -16,6 +18,8 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     private const int MaxHandshakeBytes = 8 * 1024;
     private readonly ServerOptions _options;
     private readonly ClientManager _clients;
+    private readonly RemoteAdministrationAuditLog _auditLog;
+    private readonly ChatService? _chatService;
     private readonly TcpListener _listener;
     private readonly ConcurrentDictionary<string, PendingScreenShare> _requests = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PendingScreenShare> _clientSlots = new(StringComparer.OrdinalIgnoreCase);
@@ -25,10 +29,13 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     private Task? _acceptTask;
     private int _disposed;
 
-    public ScreenStreamingService(ServerOptions options, ClientManager clients)
+    public ScreenStreamingService(ServerOptions options, ClientManager clients, RemoteAdministrationAuditLog? auditLog = null,
+        ChatService? chatService = null)
     {
         _options = options;
         _clients = clients;
+        _auditLog = auditLog ?? new RemoteAdministrationAuditLog();
+        _chatService = chatService;
         _listener = new TcpListener(options.Host, options.ScreenPort);
     }
 
@@ -41,6 +48,18 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     }
 
     public bool HasSession(string clientId) => _clientSlots.ContainsKey(clientId);
+
+    internal bool TryGetSessionSnapshot(string clientId, out RemoteSessionSnapshot? snapshot)
+    {
+        if (_clientSlots.TryGetValue(clientId, out var pending))
+        {
+            snapshot = pending.ToSnapshot();
+            return true;
+        }
+
+        snapshot = null;
+        return false;
+    }
 
     internal async Task StopControlAsync(PendingScreenShare pending, string reason)
     {
@@ -56,12 +75,28 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
         }
     }
 
-    public async Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token)
+    public Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token)
+    {
+        if (!_clientSlots.TryGetValue(clientId, out var pending) || pending.Client.SessionId != sessionId ||
+            pending.RequestId != screenRequestId)
+            throw new InvalidOperationException("The matching screen session is not active.");
+
+        return RequestControlAsync(clientId, sessionId, screenRequestId,
+            CreateAuthorization(pending, RemoteSessionPermission.Control), token);
+    }
+
+    internal async Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId,
+        RemoteSessionAuthorization authorization, CancellationToken token)
     {
         if (_options.TlsCertificate is null)
             throw new InvalidOperationException("Remote control requires an authenticated TLS Server certificate.");
+        var authorizationError = RemoteSessionAuthorizationPolicy.Validate(
+            authorization, _options.AdminToken, RemoteSessionPermission.Control, DateTime.UtcNow);
+        if (authorizationError is not null)
+            throw new UnauthorizedAccessException(authorizationError);
         if (!_clientSlots.TryGetValue(clientId, out var pending) || pending.Client.SessionId != sessionId ||
-            pending.RequestId != screenRequestId || pending.IsStopped || !pending.Stream.Task.IsCompletedSuccessfully)
+            pending.RequestId != screenRequestId || pending.IsStopped || pending.IsExpired ||
+            pending.State != RemoteSessionState.Active || !pending.Stream.Task.IsCompletedSuccessfully)
             throw new InvalidOperationException("The matching screen session is not active.");
         var controlRequestId = Guid.NewGuid().ToString("N");
         if (!pending.TryBeginControl(controlRequestId)) throw new InvalidOperationException("A control request is already pending or active.");
@@ -69,7 +104,9 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
         {
             await _clients.SendAsync(sessionId, MessageType.ControlRequest, controlRequestId,
                 new RemoteControlRequestMessage { ClientId = clientId, SessionId = sessionId, ScreenRequestId = screenRequestId }, token).ConfigureAwait(false);
-            return await pending.ControlConsent.Task.WaitAsync(TimeSpan.FromSeconds(60), token).ConfigureAwait(false);
+            var accepted = await pending.ControlConsent.Task.WaitAsync(TimeSpan.FromSeconds(60), token).ConfigureAwait(false);
+            if (accepted) pending.GrantControl();
+            return accepted;
         }
         catch
         {
@@ -97,20 +134,29 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
         return _clients.SendAsync(pending.Client.SessionId, MessageType.ControlInputEvent, controlRequestId, input, token);
     }
 
-    public async Task<ScreenViewerSession> RequestAsync(string clientId, string sessionId, CancellationToken token,
+    public async Task<ScreenViewerSession> RequestAsync(string clientId, string sessionId,
+        RemoteSessionAuthorization authorization, CancellationToken token,
         Action? onConnecting = null)
     {
         if (!_clients.TryGet(sessionId, out var client) || client is null || !client.IsReady ||
             !string.Equals(client.ClientId, clientId, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Selected Client session is no longer connected.");
 
-        var pending = new PendingScreenShare(client);
+        var authorizationError = RemoteSessionAuthorizationPolicy.Validate(
+            authorization, _options.AdminToken, RemoteSessionPermission.ViewOnly, DateTime.UtcNow);
+        if (authorizationError is not null)
+            throw new UnauthorizedAccessException(authorizationError);
+
+        var pending = new PendingScreenShare(client, authorization.AdminId,
+            authorization.Permission, _options.RemoteSessionTimeout, _auditLog);
         if (!_clientSlots.TryAdd(clientId, pending))
             throw new InvalidOperationException("A screen share is already pending or active for this Client.");
         _requests[pending.RequestId] = pending;
+        ScheduleExpiration(pending);
 
         try
         {
+            pending.TryTransition(RemoteSessionState.AwaitingConsent, "Screen consent requested.");
             await _clients.SendAsync(sessionId, MessageType.ScreenShareRequest, pending.RequestId,
                 new ScreenShareRequestMessage
                 {
@@ -120,10 +166,15 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
 
             var accepted = await pending.Consent.Task.WaitAsync(_options.ScreenConsentTimeout + TimeSpan.FromSeconds(5), token).ConfigureAwait(false);
             if (!accepted)
+            {
+                pending.TryTransition(RemoteSessionState.Rejected, "Client declined screen sharing consent.");
                 throw new InvalidOperationException("The Client user declined the screen sharing request.");
+            }
 
+            pending.TryTransition(RemoteSessionState.Accepted, "Client accepted screen sharing consent.");
             onConnecting?.Invoke();
             pending.Capability = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            pending.TryTransition(RemoteSessionState.Starting, "Screen channel startup requested.");
             await _clients.SendAsync(sessionId, MessageType.ScreenShareStart, pending.RequestId,
                 new ScreenShareStartMessage
                 {
@@ -135,10 +186,25 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
 
             var stream = await pending.Stream.Task.WaitAsync(TimeSpan.FromSeconds(20), token).ConfigureAwait(false);
             pending.SetActiveStream(stream);
-            return new ScreenViewerSession(this, pending, stream);
+            pending.TryTransition(RemoteSessionState.Active, "Screen channel is active.");
+            return new ScreenViewerSession(this, pending, stream,
+                _chatService?.CreateSession(pending.Client.ClientId, pending.Client.SessionId));
+        }
+        catch (OperationCanceledException)
+        {
+            pending.TryTransition(RemoteSessionState.Canceled, "Screen session request was canceled.");
+            await StopPendingAsync(pending, "Screen session request was canceled.", notifyClient: true).ConfigureAwait(false);
+            throw;
+        }
+        catch (TimeoutException)
+        {
+            pending.TryTransition(RemoteSessionState.TimedOut, "Screen session request timed out.");
+            await StopPendingAsync(pending, "Screen session request timed out.", notifyClient: true).ConfigureAwait(false);
+            throw;
         }
         catch
         {
+            pending.TryTransition(RemoteSessionState.Failed, "Screen session request failed.");
             await StopPendingAsync(pending, "Screen request failed, was declined, or timed out.", notifyClient: true).ConfigureAwait(false);
             throw;
         }
@@ -148,11 +214,13 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     {
         if (envelope.Type == MessageType.ScreenShareConsent)
         {
-            if (!_requests.TryGetValue(envelope.RequestId, out var pending) || pending.Client.SessionId != session.SessionId)
+            if (!_requests.TryGetValue(envelope.RequestId, out var pending) ||
+                !ReferenceEquals(pending.Client, session))
                 return;
             var consent = JsonLineProtocol.GetPayload<ScreenShareConsentMessage>(envelope);
             if (consent is null || consent.ClientId != session.ClientId || consent.SessionId != session.SessionId)
                 return;
+            if (pending.State != RemoteSessionState.AwaitingConsent || pending.IsExpired) return;
             pending.Consent.TrySetResult(consent.Accepted);
             return;
         }
@@ -174,6 +242,7 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
                 !ReferenceEquals(pending.Client, session) || consent.ClientId != session.ClientId ||
                 consent.SessionId != session.SessionId || pending.ControlRequestId != envelope.RequestId)
                 return;
+            if (pending.State != RemoteSessionState.Active || pending.IsExpired) return;
             pending.SetControlConsent(envelope.RequestId, consent.Accepted);
             return;
         }
@@ -204,6 +273,7 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
     private async Task StopPendingAsync(PendingScreenShare pending, string reason, bool notifyClient)
     {
         if (!pending.TryStop()) return;
+        pending.TryTransition(RemoteSessionState.Stopping, reason);
         if (pending.ControlRequestId is { } controlRequestId && notifyClient &&
             _clients.TryGet(pending.Client.SessionId, out var controlClient) && ReferenceEquals(controlClient, pending.Client))
         {
@@ -232,17 +302,57 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
             catch { }
         }
         pending.DisposeStream();
+        pending.TryTransition(RemoteSessionState.Closed, reason);
     }
+
+    private void ScheduleExpiration(PendingScreenShare pending)
+    {
+        _ = ExpireAsync(pending);
+    }
+
+    private async Task ExpireAsync(PendingScreenShare pending)
+    {
+        try
+        {
+            var delay = pending.ExpiresAtUtc - DateTime.UtcNow;
+            if (delay > TimeSpan.Zero)
+                await Task.Delay(delay, pending.LifetimeToken).ConfigureAwait(false);
+            if (pending.IsStopped) return;
+            pending.TryTransition(RemoteSessionState.TimedOut, "Remote session lifetime expired.");
+            await StopPendingAsync(pending, "Remote session lifetime expired.", notifyClient: true).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (pending.IsStopped) { }
+        catch (Exception ex)
+        {
+            pending.TryTransition(RemoteSessionState.Failed, $"Remote session expiry failed: {ex.Message}");
+            await StopPendingAsync(pending, "Remote session expiry failed.", notifyClient: true).ConfigureAwait(false);
+        }
+    }
+
+    private RemoteSessionAuthorization CreateAuthorization(PendingScreenShare pending, RemoteSessionPermission permission) =>
+        new()
+        {
+            AdminId = pending.AdminId,
+            AuthorizationToken = _options.AdminToken,
+            Permission = permission,
+            ExpiresAtUtc = pending.ExpiresAtUtc
+        };
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
     {
+        using var connectionSlots = new SemaphoreSlim(_options.MaxScreenConnections, _options.MaxScreenConnections);
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
+                await connectionSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
                 var client = await _listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
                 _connections.TryAdd(client, 0);
-                var handler = Task.Run(() => HandleScreenClientAsync(client, cancellationToken), CancellationToken.None);
+                var handler = Task.Run(async () =>
+                {
+                    try { await HandleScreenClientAsync(client, cancellationToken).ConfigureAwait(false); }
+                    finally { connectionSlots.Release(); }
+                }, CancellationToken.None);
                 _handlerTasks[client] = handler;
                 _ = handler.ContinueWith(completed => { _handlerTasks.TryRemove(client, out _); },
                     CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
@@ -289,6 +399,7 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
                 await JsonLineProtocol.SendAsync(network, MessageType.ScreenChannelReady, pending.RequestId,
                     new { Accepted = true }, timeout.Token).ConfigureAwait(false);
                 pending.SetActiveStream(network);
+                pending.TryTransition(RemoteSessionState.Active, "Screen channel is active.");
                 transferred = true;
                 // The Viewer owns the stream and reads frames. The accept handler must not read concurrently.
                 await pending.StreamClosed.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -342,9 +453,42 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
         _shutdown?.Dispose();
     }
 
-    internal sealed class PendingScreenShare(ClientSessionInfo client)
+    internal sealed class PendingScreenShare
     {
-        public ClientSessionInfo Client { get; } = client;
+        private readonly RemoteAdministrationAuditLog? _auditLog;
+        private readonly object _stateSync = new();
+        private readonly CancellationTokenSource _lifetimeCancellation = new();
+        private RemoteSessionState _state = RemoteSessionState.Requested;
+        private RemoteSessionPermission _grantedPermission;
+        private int _stopped;
+
+        public PendingScreenShare(ClientSessionInfo client, string adminId,
+            RemoteSessionPermission requestedPermission, TimeSpan lifetime,
+            RemoteAdministrationAuditLog? auditLog = null)
+        {
+            Client = client;
+            AdminId = adminId;
+            _grantedPermission = requestedPermission;
+            RequestedAtUtc = DateTime.UtcNow;
+            ExpiresAtUtc = RequestedAtUtc.Add(lifetime);
+            _auditLog = auditLog;
+            _auditLog?.WriteRemoteSession(Client.ClientId, Client.SessionId, AdminId, State, "Remote session requested.");
+        }
+
+        public ClientSessionInfo Client { get; }
+        public string AdminId { get; }
+        public RemoteSessionKind Kind { get; } = RemoteSessionKind.Screen;
+        public DateTime RequestedAtUtc { get; }
+        public DateTime ExpiresAtUtc { get; }
+        public CancellationToken LifetimeToken => _lifetimeCancellation.Token;
+        public RemoteSessionState State
+        {
+            get { lock (_stateSync) return _state; }
+        }
+        public RemoteSessionPermission GrantedPermission
+        {
+            get { lock (_stateSync) return _grantedPermission; }
+        }
         public string Capability { get; set; } = string.Empty;
         public string RequestId { get; } = Guid.NewGuid().ToString("N");
         public TaskCompletionSource<bool> Consent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -354,13 +498,43 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
         public string? ControlRequestId { get; private set; }
         public bool IsControlActive { get; private set; }
         public bool IsStopped => Volatile.Read(ref _stopped) != 0;
+        public bool IsExpired => DateTime.UtcNow >= ExpiresAtUtc;
         private Stream? _activeStream;
-        private int _stopped;
+
+        public bool TryTransition(RemoteSessionState next, string detail)
+        {
+            RemoteSessionState previous;
+            lock (_stateSync)
+            {
+                previous = _state;
+                if (previous == next) return true;
+                if (!CanTransition(previous, next)) return false;
+                _state = next;
+            }
+
+            _auditLog?.WriteRemoteSession(Client.ClientId, Client.SessionId, AdminId, next,
+                $"{previous} -> {next}: {detail}");
+            return true;
+        }
+
+        private static bool CanTransition(RemoteSessionState current, RemoteSessionState next) =>
+            current switch
+            {
+                RemoteSessionState.Requested => next is RemoteSessionState.AwaitingConsent or RemoteSessionState.Canceled or RemoteSessionState.Failed or RemoteSessionState.TimedOut or RemoteSessionState.Stopping,
+                RemoteSessionState.AwaitingConsent => next is RemoteSessionState.Accepted or RemoteSessionState.Rejected or RemoteSessionState.Canceled or RemoteSessionState.Failed or RemoteSessionState.TimedOut or RemoteSessionState.Stopping,
+                RemoteSessionState.Accepted => next is RemoteSessionState.Starting or RemoteSessionState.Canceled or RemoteSessionState.Failed or RemoteSessionState.TimedOut or RemoteSessionState.Stopping,
+                RemoteSessionState.Starting => next is RemoteSessionState.Active or RemoteSessionState.Canceled or RemoteSessionState.Failed or RemoteSessionState.TimedOut or RemoteSessionState.Stopping,
+                RemoteSessionState.Active => next is RemoteSessionState.Stopping or RemoteSessionState.Canceled or RemoteSessionState.TimedOut or RemoteSessionState.Failed,
+                RemoteSessionState.Rejected or RemoteSessionState.TimedOut or RemoteSessionState.Canceled or RemoteSessionState.Failed => next is RemoteSessionState.Stopping,
+                RemoteSessionState.Stopping => next == RemoteSessionState.Closed,
+                _ => false
+            };
+
         public bool TryBeginControl(string requestId)
         {
             lock (this)
             {
-                if (_stopped != 0 || ControlRequestId is not null) return false;
+                if (_stopped != 0 || IsExpired || State != RemoteSessionState.Active || ControlRequestId is not null) return false;
                 ControlRequestId = requestId;
                 ControlConsent = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 return true;
@@ -385,20 +559,46 @@ internal sealed class ScreenStreamingService : IAsyncDisposable
                 ControlConsent.TrySetResult(accepted);
             }
         }
-        public bool TryStop() => Interlocked.Exchange(ref _stopped, 1) == 0;
+        public void GrantControl()
+        {
+            lock (_stateSync) _grantedPermission = RemoteSessionPermission.ViewAndControl;
+        }
+
+        public bool TryStop()
+        {
+            if (Interlocked.Exchange(ref _stopped, 1) != 0) return false;
+            _lifetimeCancellation.Cancel();
+            return true;
+        }
+
         public void SetActiveStream(Stream stream) => _activeStream = stream;
         public void DisposeStream()
         {
             try { _activeStream?.Dispose(); } catch { }
             StreamClosed.TrySetResult();
         }
+
+        public RemoteSessionSnapshot ToSnapshot() => new()
+        {
+            ClientId = Client.ClientId,
+            SessionId = Client.SessionId,
+            AdminId = AdminId,
+            RequestId = RequestId,
+            Kind = Kind,
+            State = State,
+            GrantedPermission = GrantedPermission,
+            RequestedAtUtc = RequestedAtUtc,
+            ExpiresAtUtc = ExpiresAtUtc,
+            IsControlActive = IsControlActive
+        };
     }
 }
 
 internal sealed class ScreenViewerSession(ScreenStreamingService service,
-    ScreenStreamingService.PendingScreenShare pending, Stream stream) : IScreenViewerSession
+    ScreenStreamingService.PendingScreenShare pending, Stream stream, IRemoteChatSession? chat) : IScreenViewerSession
 {
     public bool IsControlActive => pending.IsControlActive;
+    public IRemoteChatSession? Chat => chat;
     private int _stopped;
 
     public async Task<(long Sequence, byte[] Jpeg)?> ReadFrameAsync(CancellationToken cancellationToken)
@@ -431,6 +631,7 @@ internal sealed class ScreenViewerSession(ScreenStreamingService service,
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
+        if (chat is not null) await chat.DisposeAsync().ConfigureAwait(false);
         pending.StreamClosed.TrySetResult();
     }
 }

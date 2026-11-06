@@ -51,10 +51,12 @@ internal static class Program
                 services.AddSingleton<ISystemMonitorService, SystemMonitorService>();
                 services.AddSingleton<NetworkDashboardState>();
                 services.AddSingleton<ScreenShareUi>();
+                services.AddSingleton<ClientChatUi>();
                 services.AddSingleton<DashboardPresenter>();
                 services.AddTransient<ScannerPresenter>();
                 services.AddSingleton<MainForm>(provider => new MainForm(provider,
-                    provider.GetRequiredService<DashboardPresenter>(), provider.GetRequiredService<ScreenShareUi>()));
+                    provider.GetRequiredService<DashboardPresenter>(), provider.GetRequiredService<ScreenShareUi>(),
+                    provider.GetRequiredService<ClientChatUi>()));
                 services.AddTransient<ScannerForm>(provider => new ScannerForm(provider.GetRequiredService<ScannerPresenter>()));
                 services.AddTransient<PingForm>();
                 services.AddTransient<MonitorForm>();
@@ -69,7 +71,8 @@ internal static class Program
                     provider.GetRequiredService<IPingService>(),
                     provider.GetRequiredService<INetworkScannerService>(),
                     provider.GetRequiredService<ISystemMonitorService>(),
-                    provider.GetRequiredService<ScreenShareUi>()));
+                    provider.GetRequiredService<ScreenShareUi>(),
+                    chatUi: provider.GetRequiredService<ClientChatUi>()));
             })
             .Build();
 

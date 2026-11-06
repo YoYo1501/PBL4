@@ -3,6 +3,9 @@ using NetworkAdmin.Shared.Models;
 using NetworkAdmin.Shared.Policies;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Server.Application.Interfaces;
+using NetworkAdmin.Server.Audit;
+using NetworkAdmin.Server.Infrastructure.Chat;
+using NetworkAdmin.Server.Infrastructure.Security;
 using System.Security.Cryptography;
 
 namespace NetworkAdmin.Server.Runtime;
@@ -14,7 +17,12 @@ internal sealed class ServerRuntime : IServerRuntime
     private readonly ServerCommandDispatcher _dispatcher;
     private readonly TcpHelloServer _server;
     private readonly ScreenStreamingService _screenStreaming;
+    private readonly ChatService _chatService;
+    private readonly SecurityAlertService _securityAlertService;
+    private readonly RemoteAdministrationAuditLog _auditLog = new();
     private readonly string _adminToken;
+    private readonly string _adminId;
+    private readonly TimeSpan _remoteSessionTimeout;
     private readonly System.Security.Cryptography.X509Certificates.X509Certificate2? _tlsCertificate;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<string, ClientSnapshot> _history = new(StringComparer.OrdinalIgnoreCase);
@@ -23,10 +31,16 @@ internal sealed class ServerRuntime : IServerRuntime
 
     public ServerRuntime(ServerOptions options)
     {
-        _dispatcher = new(_clients);
-        _screenStreaming = new(options, _clients);
-        _server = new(options, _clients, _dispatcher, _screenStreaming);
+        _dispatcher = new(_clients, _auditLog);
+        _chatService = new(_clients, options.AdminId, options.AdminToken);
+        _screenStreaming = new(options, _clients, _auditLog, _chatService);
+        _securityAlertService = new(_clients,
+            (sessionId, reason, cancellationToken) => _screenStreaming.StopForSessionAsync(sessionId, reason),
+            options.SecurityAlertPolicy, _auditLog);
+        _server = new(options, _clients, _dispatcher, _screenStreaming, _chatService, _securityAlertService);
         _adminToken = options.AdminToken;
+        _adminId = options.AdminId;
+        _remoteSessionTimeout = options.RemoteSessionTimeout;
         _tlsCertificate = options.TlsCertificate;
         SecurityFingerprint = options.TlsCertificate?.GetCertHashString(HashAlgorithmName.SHA256) ?? "TLS disabled (test configuration)";
         Endpoint = $"{options.Host}:{options.Port} | TLS SHA256 {SecurityFingerprint}";
@@ -36,6 +50,17 @@ internal sealed class ServerRuntime : IServerRuntime
     public string SecurityFingerprint { get; }
     public string Status => _error is not null ? $"Stopped: {_error}" : _server.IsListening ? "Running" : "Stopped";
     public bool IsRunning => _server.IsListening;
+    public bool AutoDisconnectEnabled => _securityAlertService.AutoDisconnectEnabled;
+    public event Action<RemoteChatMessage>? ChatMessageReceived
+    {
+        add => _chatService.MessageReceived += value;
+        remove => _chatService.MessageReceived -= value;
+    }
+    public event Action<SecurityAlertMessage>? SecurityAlertReceived
+    {
+        add => _securityAlertService.AlertReceived += value;
+        remove => _securityAlertService.AlertReceived -= value;
+    }
 
     public void Start()
     {
@@ -63,7 +88,17 @@ internal sealed class ServerRuntime : IServerRuntime
         await _shutdown.CancelAsync();
         if (_serverTask is not null) await _serverTask.ConfigureAwait(false);
         await _screenStreaming.DisposeAsync().ConfigureAwait(false);
+        await _chatService.DisposeAsync().ConfigureAwait(false);
+        await _securityAlertService.DisposeAsync().ConfigureAwait(false);
         _tlsCertificate?.Dispose();
+    }
+
+    public bool SetAutoDisconnectEnabled(bool enabled)
+    {
+        // The dashboard runs in the configured Server process. Requiring a configured
+        // admin token keeps the local policy switch fail-closed in test/unconfigured mode.
+        return !string.IsNullOrEmpty(_adminToken) &&
+            _securityAlertService.SetAutoDisconnectEnabled(enabled, _adminId);
     }
 
     public Task<IScreenViewerSession> RequestScreenAsync(string clientId, string sessionId, CancellationToken token,
@@ -72,12 +107,26 @@ internal sealed class ServerRuntime : IServerRuntime
 
     private async Task<IScreenViewerSession> RequestScreenCoreAsync(string clientId, string sessionId,
         CancellationToken token, Action? onConnecting) =>
-        await _screenStreaming.RequestAsync(clientId, sessionId, token, onConnecting).ConfigureAwait(false);
+        await _screenStreaming.RequestAsync(clientId, sessionId,
+            CreateSessionAuthorization(RemoteSessionPermission.ViewOnly), token, onConnecting).ConfigureAwait(false);
 
     public bool IsScreenSharing(string clientId) => _screenStreaming.HasSession(clientId);
 
+    public Task SendChatAsync(string clientId, string sessionId, string content, CancellationToken token) =>
+        _chatService.SendFromAdminAsync(clientId, sessionId,
+            CreateSessionAuthorization(RemoteSessionPermission.ViewOnly), content, token);
+
     public Task<bool> RequestControlAsync(string clientId, string sessionId, string screenRequestId, CancellationToken token) =>
-        _screenStreaming.RequestControlAsync(clientId, sessionId, screenRequestId, token);
+        _screenStreaming.RequestControlAsync(clientId, sessionId, screenRequestId,
+            CreateSessionAuthorization(RemoteSessionPermission.Control), token);
+
+    private RemoteSessionAuthorization CreateSessionAuthorization(RemoteSessionPermission permission) => new()
+    {
+        AdminId = _adminId,
+        AuthorizationToken = _adminToken,
+        Permission = permission,
+        ExpiresAtUtc = DateTime.UtcNow.Add(_remoteSessionTimeout)
+    };
 
     // Called by the UI timer, never by a socket callback. Retain recent disconnected sessions.
     public IReadOnlyList<ClientSnapshot> GetClients()

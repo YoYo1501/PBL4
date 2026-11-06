@@ -62,7 +62,8 @@ internal sealed class ServerConnection : IAsyncDisposable
             new HelloMessage
             {
                 ClientId = ClientId,
-                ClientName = ClientName
+                ClientName = ClientName,
+                Capabilities = [RemoteProtocolCapabilities.RemoteSessionV1, RemoteProtocolCapabilities.RemoteChatV1]
             },
             cancellationToken).ConfigureAwait(false);
 
@@ -81,6 +82,9 @@ internal sealed class ServerConnection : IAsyncDisposable
 
         var ack = JsonLineProtocol.GetPayload<HelloAckMessage>(envelope)
             ?? throw new InvalidDataException("HelloAck payload is missing.");
+
+        var ackError = RemoteProtocolContract.ValidateHelloAck(ack);
+        if (ackError is not null) throw new InvalidDataException(ackError);
 
         if (!ack.Accepted)
         {

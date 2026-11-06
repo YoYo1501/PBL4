@@ -27,6 +27,13 @@ public static class JsonLineProtocol
         TPayload payload,
         CancellationToken cancellationToken = default)
     {
+        if (!RemoteProtocolContract.IsKnownMessageType(type))
+            throw new ArgumentOutOfRangeException(nameof(type), "Message type is not recognized.");
+        if (!RemoteProtocolContract.IsValidRequestId(requestId))
+            throw new ArgumentException("RequestId is required and must be a valid identifier.", nameof(requestId));
+        if (payload is null)
+            throw new ArgumentNullException(nameof(payload));
+
         var envelope = new
         {
             Type = type,
@@ -36,6 +43,8 @@ public static class JsonLineProtocol
 
         var json = JsonSerializer.Serialize(envelope, JsonOptions);
         var bytes = Encoding.UTF8.GetBytes(json + "\n");
+        if (bytes.Length > DefaultMaxFrameBytes)
+            throw new InvalidDataException($"Frame exceeds the limit of {DefaultMaxFrameBytes} bytes.");
         await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -51,7 +60,11 @@ public static class JsonLineProtocol
             return null;
         }
 
-        return JsonSerializer.Deserialize<MessageEnvelope>(frame, JsonOptions);
+        var envelope = JsonSerializer.Deserialize<MessageEnvelope>(frame, JsonOptions);
+        var validationError = RemoteProtocolContract.ValidateEnvelope(envelope);
+        if (validationError is not null)
+            throw new InvalidDataException(validationError);
+        return envelope;
     }
 
     public static TPayload? GetPayload<TPayload>(MessageEnvelope envelope)

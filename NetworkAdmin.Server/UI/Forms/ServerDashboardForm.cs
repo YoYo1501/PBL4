@@ -38,6 +38,21 @@ internal sealed class ServerDashboardForm : Form
     private readonly ClientDetailView _clientsDetail = new();
     private readonly TelemetryView _dashboardTelemetry = new();
     private readonly TelemetryView _monitoringTelemetry = new();
+    private readonly Label _monitoringStatus = DashboardTheme.Label("Alert stream idle; waiting for Client monitoring.", 10, color: DashboardTheme.Muted);
+    private readonly Label _autoDisconnectStatus = DashboardTheme.Label("Disabled: alerts only; sessions are not stopped automatically.", 9, color: DashboardTheme.Muted);
+    private readonly Button _autoDisconnectButton = DashboardTheme.Button("Enable auto-disconnect", false);
+    private readonly ListBox _securityAlerts = new()
+    {
+        Dock = DockStyle.Fill,
+        BackColor = DashboardTheme.Surface,
+        ForeColor = DashboardTheme.Text,
+        BorderStyle = BorderStyle.None,
+        IntegralHeight = false,
+        HorizontalScrollbar = true,
+        AccessibleName = "Security alerts"
+    };
+    private readonly object _alertSync = new();
+    private readonly List<SecurityAlertMessage> _securityAlertHistory = [];
     private readonly ScanView _dashboardScan = new(false);
     private readonly ScanView _scanner = new(true);
     private readonly PingView _dashboardPing = new(false);
@@ -135,7 +150,7 @@ internal sealed class ServerDashboardForm : Form
         AddPage("Clients", BuildClients(), 660);
         AddPage("IP Scanner", _scanner, 520);
         AddPage("Ping Tool", _pingPage, 520);
-        AddPage("Monitoring", _monitoringTelemetry, 540);
+        AddPage("Monitoring", BuildMonitoring(), 620);
         AddPage("Settings", BuildSettings(), 450);
         AddPage("About", BuildAbout(), 400);
         Navigate("Dashboard");
@@ -163,6 +178,7 @@ internal sealed class ServerDashboardForm : Form
         _scanner.ScanButton.Click += (_, _) => _scanTask = ScanAsync();
         _agentInfoButton.Click += (_, _) => _agentInfoTask = GetAgentInfoAsync();
         _viewScreenButton.Click += async (_, _) => await OpenScreenViewerAsync();
+        _autoDisconnectButton.Click += (_, _) => ToggleAutoDisconnect();
         _shutdownButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Shutdown);
         _restartButton.Click += (_, _) => _powerTask = PowerAsync(RemoteAdministrationCommandType.Restart);
         _cancelPowerButton.Click += (_, _) => _powerCancellation?.Cancel();
@@ -176,6 +192,7 @@ internal sealed class ServerDashboardForm : Form
             else _scanTask = ScanAsync();
         };
         _refresh.Tick += (_, _) => RefreshState();
+        _runtime.SecurityAlertReceived += OnSecurityAlertReceived;
         Shown += (_, _) => { _runtime.Start(); RefreshState(); _refresh.Start(); };
         FormClosing += CloseAsync;
         AutoScaleDimensions = new SizeF(96, 96);
@@ -311,6 +328,25 @@ internal sealed class ServerDashboardForm : Form
         var card = new DashboardCard("Server Configuration");
         card.Body.Controls.Add(_settings); return card;
     }
+
+    private Control BuildMonitoring()
+    {
+        var page = DashboardTheme.Rows(230, -100);
+        var policy = new DashboardCard("AI Security Monitoring / Runtime policy");
+        var policyRows = DashboardTheme.Rows(34, 34, 42, -100);
+        policyRows.Controls.Add(_monitoringStatus, 0, 0);
+        policyRows.Controls.Add(_autoDisconnectStatus, 0, 1);
+        policyRows.Controls.Add(_autoDisconnectButton, 0, 2);
+        policyRows.Controls.Add(_monitoringTelemetry, 0, 3);
+        policy.Body.Controls.Add(policyRows);
+        page.Controls.Add(policy, 0, 0);
+
+        var alerts = new DashboardCard("Security Alerts / newest first");
+        alerts.Body.Controls.Add(_securityAlerts);
+        page.Controls.Add(alerts, 0, 1);
+        return page;
+    }
+
     private static Control BuildAbout()
     {
         var card = new DashboardCard("About / Network Administration Server");
@@ -390,6 +426,7 @@ internal sealed class ServerDashboardForm : Form
             "Dashboard refresh: 500 ms\nHistory: last 60 received samples per session, in memory\n" +
             "Stale telemetry threshold: 10 seconds\nRemote scanner: IPv4 unicast /23 through /30 (510 hosts maximum)\n\n" +
             "No connection settings are changed by this page.";
+        RenderSecurityMonitoring();
         _updating = true;
         try
         {
@@ -466,6 +503,93 @@ internal sealed class ServerDashboardForm : Form
         RenderScan();
     }
 
+    private void OnSecurityAlertReceived(SecurityAlertMessage alert)
+    {
+        lock (_alertSync)
+        {
+            _securityAlertHistory.Insert(0, alert);
+            if (_securityAlertHistory.Count > 100)
+                _securityAlertHistory.RemoveRange(100, _securityAlertHistory.Count - 100);
+        }
+
+        if (_closing || IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(new Action(RenderSecurityMonitoring)); }
+        catch (InvalidOperationException) { }
+    }
+
+    private void RenderSecurityMonitoring()
+    {
+        if (IsDisposed) return;
+        var running = _runtime.IsRunning && !_closing;
+        var enabled = _runtime.AutoDisconnectEnabled;
+        _monitoringStatus.Text = running
+            ? "Alert stream ready; Client monitoring publishes alerts over the authenticated session."
+            : "Alert stream unavailable because the Server is stopped.";
+        _monitoringStatus.ForeColor = running ? DashboardTheme.Blue : DashboardTheme.Red;
+        _autoDisconnectStatus.Text = enabled
+            ? "Enabled: qualifying Critical alerts will stop only their matching remote session."
+            : "Disabled: alerts only; sessions are not stopped automatically.";
+        _autoDisconnectStatus.ForeColor = enabled ? DashboardTheme.Red : DashboardTheme.Muted;
+        _autoDisconnectButton.Enabled = running;
+        _autoDisconnectButton.Text = enabled ? "Disable auto-disconnect" : "Enable auto-disconnect";
+
+        SecurityAlertMessage[] alerts;
+        lock (_alertSync) alerts = _securityAlertHistory.ToArray();
+        _securityAlerts.BeginUpdate();
+        try
+        {
+            _securityAlerts.Items.Clear();
+            if (alerts.Length == 0)
+            {
+                _securityAlerts.Items.Add("No security alerts received in this Server run.");
+                return;
+            }
+
+            foreach (var alert in alerts)
+            {
+                var session = alert.SessionId[..Math.Min(8, alert.SessionId.Length)];
+                _securityAlerts.Items.Add(
+                    $"[{alert.DetectionTimestampUtc.ToLocalTime():HH:mm:ss}] {alert.Severity} | " +
+                    $"{alert.ProcessName} | session {session} | {alert.DetectionReason}");
+            }
+        }
+        finally { _securityAlerts.EndUpdate(); }
+    }
+
+    private void ToggleAutoDisconnect()
+    {
+        if (_closing || !_runtime.IsRunning) return;
+        var enable = !_runtime.AutoDisconnectEnabled;
+        if (enable)
+        {
+            var confirmation = MessageBox.Show(this,
+                "Enable automatic disconnect for qualifying security alerts?\n\n" +
+                "Only the matching remote session is stopped. This policy can interrupt an active session.",
+                "Confirm auto-disconnect", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (confirmation != DialogResult.Yes) return;
+        }
+
+        _autoDisconnectButton.Enabled = false;
+        _autoDisconnectStatus.Text = "Updating security policy...";
+        try
+        {
+            if (!_runtime.SetAutoDisconnectEnabled(enable))
+            {
+                _autoDisconnectStatus.Text = "Policy update rejected: administrator token is not configured.";
+                _autoDisconnectStatus.ForeColor = DashboardTheme.Red;
+                return;
+            }
+
+            RenderSecurityMonitoring();
+        }
+        catch (Exception ex)
+        {
+            _autoDisconnectStatus.Text = $"Policy update failed: {ex.GetBaseException().Message}";
+            _autoDisconnectStatus.ForeColor = DashboardTheme.Red;
+        }
+    }
+
     private void UpdatePingTargetChoices(ClientSnapshot? client, SessionCommandState state)
     {
         var choices = new List<string>();
@@ -503,7 +627,7 @@ internal sealed class ServerDashboardForm : Form
 
         _screenRequestPending = true;
         _viewScreenButton.Enabled = false;
-        _viewScreenButton.Text = "Requesting…";
+        _viewScreenButton.Text = "Requesting...";
         try
         {
             var viewer = new RemoteViewerForm(client.Hostname, client.ClientId,
@@ -703,6 +827,7 @@ internal sealed class ServerDashboardForm : Form
         e.Cancel = true;
         if (_closing) return;
         _closing = true; _refresh.Stop(); Enabled = false;
+        _runtime.SecurityAlertReceived -= OnSecurityAlertReceived;
         try
         {
             _powerCancellation?.Cancel();
