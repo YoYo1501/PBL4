@@ -15,7 +15,7 @@ internal sealed class ScreenShareUi : IScreenShareConsent
     public Task<bool> RequestConsentAsync(string serverName, CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Post(() =>
+        if (!Post(() =>
         {
             if (cancellationToken.IsCancellationRequested || _owner is null || _owner.IsDisposed)
             {
@@ -31,6 +31,7 @@ internal sealed class ScreenShareUi : IScreenShareConsent
                 MinimizeBox = false,
                 MaximizeBox = false,
                 ShowInTaskbar = false,
+                TopMost = true,
                 ClientSize = new Size(440, 160)
             };
             var label = new Label
@@ -66,7 +67,8 @@ internal sealed class ScreenShareUi : IScreenShareConsent
             });
             var result = dialog.ShowDialog(_owner);
             completion.TrySetResult(result == DialogResult.Yes && !cancellationToken.IsCancellationRequested);
-        });
+        }))
+            completion.TrySetResult(false);
         return completion.Task.WaitAsync(cancellationToken);
     }
 
@@ -138,7 +140,7 @@ internal sealed class ScreenShareUi : IScreenShareConsent
     public Task<bool> RequestControlConsentAsync(string serverName, CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Post(() =>
+        if (!Post(() =>
         {
             if (cancellationToken.IsCancellationRequested || _owner is null || _owner.IsDisposed)
             { completion.TrySetResult(false); return; }
@@ -166,15 +168,23 @@ internal sealed class ScreenShareUi : IScreenShareConsent
                 catch (InvalidOperationException) { }
             });
             completion.TrySetResult(dialog.ShowDialog(_owner) == DialogResult.Yes && !cancellationToken.IsCancellationRequested);
-        });
+        }))
+            completion.TrySetResult(false);
         return completion.Task.WaitAsync(cancellationToken);
     }
 
-    private void Post(Action action)
+    private bool Post(Action action)
     {
         var owner = _owner;
-        if (owner is null || owner.IsDisposed || !owner.IsHandleCreated) return;
-        try { owner.BeginInvoke(action); }
-        catch (InvalidOperationException) { }
+        if (owner is null || owner.IsDisposed || !owner.IsHandleCreated) return false;
+        try
+        {
+            owner.BeginInvoke(action);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 }
