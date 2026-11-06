@@ -80,7 +80,13 @@ internal static class Program
         host.StartAsync().GetAwaiter().GetResult();
         var mainForm = host.Services.GetRequiredService<MainForm>();
         var runtime = host.Services.GetRequiredService<ClientRuntime>();
-        if (!standalone) runtime.Start();
+        if (!standalone)
+        {
+            // Start the network reader only after WinForms has created the main
+            // window handle. ScreenShareUi posts consent dialogs through this
+            // handle; starting earlier can lose the first cross-machine request.
+            mainForm.Shown += (_, _) => runtime.Start();
+        }
         System.Windows.Forms.Application.Run(mainForm);
         runtime.StopAsync().GetAwaiter().GetResult();
         host.StopAsync().GetAwaiter().GetResult();
