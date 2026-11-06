@@ -2,7 +2,8 @@
   "profiles": {
     "NetworkAdmin.Client": {
       "commandName": "Project",
-      "commandLineArgs": "--host 172.31.99.131 --port 5000 --tls-sha256 E009F249C40A0866F4F46AF68330EC66BDD773D3E0B21474CDA8D45C831D58D9"
+      //"commandLineArgs": "--host 127.0.0.1 --port 5000 --tls-sha256 D9E300F8941CA28FC0A755977B84D4D543A14F41BD4995A663212B69FBD5970E --admin-token local-test-token"
+      "commandLineArgs": "--host 172.31.99.131 --port 5000 --tls-sha256 E009F249C40A0866F4F46AF68330EC66BDD773D3E0B21474CDA8D45C831D58D9 --admin-token abc123"
     }
   }
 }
