@@ -35,9 +35,9 @@ internal sealed class ScreenCaptureService
         // Capture runs on a worker thread. Give that thread the same physical-pixel
         // coordinate space as the interactive desktop before reading bounds/capturing.
         using var dpiContext = DpiAwarenessContext.EnterPerMonitorV2();
-        // RemoteX captures the primary screen. Read its active physical mode instead
-        // of DPI-scaled UI bounds, then copy that exact pixel rectangle.
-        var bounds = GetPrimaryDisplayBounds();
+        // Use the physical virtual-desktop rectangle so capture includes every
+        // attached display and honors negative coordinates in multi-monitor layouts.
+        var bounds = GetVirtualDesktopBounds();
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No active screen is available for capture.");
 
@@ -50,7 +50,7 @@ internal sealed class ScreenCaptureService
         var width = scale >= 1d ? source.Width : Math.Max(1, (int)(source.Width * scale));
         var height = scale >= 1d ? source.Height : Math.Max(1, (int)(source.Height * scale));
         if (Interlocked.Exchange(ref _captureInfoLogged, 1) == 0)
-            Console.WriteLine($"[ScreenCapture] physicalBounds={bounds.X},{bounds.Y},{bounds.Width}x{bounds.Height} output={width}x{height}");
+            WriteCaptureInfo(bounds, width, height);
         if (scale >= 1d)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -184,17 +184,37 @@ internal sealed class ScreenCaptureService
     }
 
     /// <summary>
-    /// Returns the primary display's active physical mode, independent of Windows UI scaling.
+    /// Returns the physical virtual-desktop rectangle, independent of Windows UI scaling.
     /// </summary>
-    private static Rectangle GetPrimaryDisplayBounds()
+    private static Rectangle GetVirtualDesktopBounds()
     {
-        const int CurrentSettings = -1;
-        var mode = new DevMode { dmDeviceName = string.Empty, dmFormName = string.Empty };
-        mode.dmSize = (ushort)Marshal.SizeOf<DevMode>();
-        if (!EnumDisplaySettings(null, CurrentSettings, ref mode) || mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not read the active primary display resolution.");
-        return new Rectangle(mode.dmPositionX, mode.dmPositionY,
-            checked((int)mode.dmPelsWidth), checked((int)mode.dmPelsHeight));
+        const int SmXVirtualScreen = 76;
+        const int SmYVirtualScreen = 77;
+        const int SmCxVirtualScreen = 78;
+        const int SmCyVirtualScreen = 79;
+        var left = GetSystemMetrics(SmXVirtualScreen);
+        var top = GetSystemMetrics(SmYVirtualScreen);
+        var width = GetSystemMetrics(SmCxVirtualScreen);
+        var height = GetSystemMetrics(SmCyVirtualScreen);
+        if (width <= 0 || height <= 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not read the physical virtual-desktop bounds.");
+        return new Rectangle(left, top, width, height);
+    }
+
+    private static void WriteCaptureInfo(Rectangle bounds, int outputWidth, int outputHeight)
+    {
+        var message = $"[{DateTimeOffset.Now:O}] virtualBounds={bounds.X},{bounds.Y},{bounds.Width}x{bounds.Height}; output={outputWidth}x{outputHeight}{Environment.NewLine}";
+        System.Diagnostics.Trace.Write(message);
+        try
+        {
+            var directory = Path.Combine(AppContext.BaseDirectory, "Logs");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "screen-capture.log"), message);
+        }
+        catch
+        {
+            // Diagnostics must never interrupt screen capture.
+        }
     }
 
     private static void CapturePhysicalDesktop(Bitmap destination, Rectangle bounds)
@@ -226,44 +246,8 @@ internal sealed class ScreenCaptureService
         private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct DevMode
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
-        public ushort dmSpecVersion;
-        public ushort dmDriverVersion;
-        public ushort dmSize;
-        public ushort dmDriverExtra;
-        public uint dmFields;
-        public int dmPositionX;
-        public int dmPositionY;
-        public uint dmDisplayOrientation;
-        public uint dmDisplayFixedOutput;
-        public short dmColor;
-        public short dmDuplex;
-        public short dmYResolution;
-        public short dmTTOption;
-        public short dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
-        public ushort dmLogPixels;
-        public uint dmBitsPerPel;
-        public uint dmPelsWidth;
-        public uint dmPelsHeight;
-        public uint dmDisplayFlags;
-        public uint dmDisplayFrequency;
-        public uint dmICMMethod;
-        public uint dmICMIntent;
-        public uint dmMediaType;
-        public uint dmDitherType;
-        public uint dmReserved1;
-        public uint dmReserved2;
-        public uint dmPanningWidth;
-        public uint dmPanningHeight;
-    }
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool EnumDisplaySettings(string? deviceName, int modeNumber, ref DevMode devMode);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetSystemMetrics(int index);
 
     private byte[] EncodeJpeg(Image image)
     {
