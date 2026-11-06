@@ -2,6 +2,7 @@ using NetworkAdmin.Server.UI;
 using System.Diagnostics;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Diagnostics;
+using NetworkAdmin.Shared.Protocol;
 
 namespace NetworkAdmin.Server.UI.Forms;
 
@@ -12,6 +13,8 @@ internal sealed class RemoteViewerForm : Form
     private readonly string _clientName;
     private readonly string _clientId;
     private readonly Panel _canvas = new() { Dock = DockStyle.Fill, AutoScroll = false, BackColor = DashboardTheme.Background };
+    private TableLayoutPanel? _rootLayout;
+    private Panel? _headerPanel;
     private readonly MeasuredPictureBox _picture = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(1, 10, 18), TabStop = true };
     private readonly Label _state = DashboardTheme.Label("WAITING", 9, true, DashboardTheme.Muted);
     private readonly Label _fps = DashboardTheme.Label("-- FPS", 9, true, DashboardTheme.Blue);
@@ -53,7 +56,7 @@ internal sealed class RemoteViewerForm : Form
         _clientName = clientName;
         _clientId = clientId;
         _performance = ScreenSharePerformanceMonitor.Enabled ? new ScreenSharePerformanceMonitor() : null;
-        _presenter = new RemoteViewerPresenter(connect, _performance);
+        _presenter = new RemoteViewerPresenter(connect, _performance, ScreenShareV2Configuration.IsEnabled);
         _picture.Performance = _performance;
         Text = $"Remote Viewer — {clientName}";
         StartPosition = FormStartPosition.CenterParent;
@@ -109,6 +112,7 @@ internal sealed class RemoteViewerForm : Form
             RowCount = 3,
             Padding = new Padding(10)
         };
+        _rootLayout = root;
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -120,6 +124,7 @@ internal sealed class RemoteViewerForm : Form
             Padding = new Padding(12, 4, 8, 4),
             Margin = new Padding(0, 0, 0, 8)
         };
+        _headerPanel = header;
         var headerGrid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -328,14 +333,20 @@ internal sealed class RemoteViewerForm : Form
         {
             _previousBorderStyle = FormBorderStyle;
             _previousWindowState = WindowState;
+            _rootLayout!.RowStyles[0].Height = 0;
+            _headerPanel!.Visible = false;
             FormBorderStyle = FormBorderStyle.None;
             WindowState = FormWindowState.Maximized;
+            _rootLayout.PerformLayout();
             _fullScreenButton.Text = "Exit full screen";
             _fullScreen = true;
             return;
         }
         FormBorderStyle = _previousBorderStyle;
         WindowState = _previousWindowState == FormWindowState.Minimized ? FormWindowState.Normal : _previousWindowState;
+        _rootLayout!.RowStyles[0].Height = 116;
+        _headerPanel!.Visible = true;
+        _rootLayout.PerformLayout();
         _fullScreenButton.Text = "Full screen";
         _fullScreen = false;
     }

@@ -7,6 +7,7 @@ using NetworkAdmin.Client.Infrastructure.Networking;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Shared.Protocol;
 using NetworkAdmin.Shared.Diagnostics;
+using NetworkAdmin.Client.Infrastructure.ScreenSharing.V2;
 
 namespace NetworkAdmin.Client.Infrastructure.ScreenSharing;
 
@@ -312,6 +313,16 @@ internal sealed class ClientScreenShareService
 
         _performance?.Start();
         onConnected();
+        if (_options.ScreenV2Enabled)
+        {
+            var sender = new ScreenShareV2Sender(
+                token => _capture.TryCaptureBitmap(token, out var bitmap) ? bitmap : null,
+                _options.ScreenMaxFps, _options.ScreenJpegQuality, _performance);
+            try { await sender.RunAsync(stream, cancellationToken).ConfigureAwait(false); }
+            finally { _performance?.Stop(); }
+            return;
+        }
+
         long sequence = 0;
         Bitmap? previous = null;
         using var pipelineStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

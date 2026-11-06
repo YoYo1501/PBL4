@@ -2,6 +2,7 @@ using System.Diagnostics;
 using NetworkAdmin.Shared.Messages;
 using NetworkAdmin.Server.Application.Interfaces;
 using NetworkAdmin.Shared.Diagnostics;
+using NetworkAdmin.Server.Presentation.V2;
 
 namespace NetworkAdmin.Server.Presentation;
 
@@ -18,6 +19,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly SemaphoreSlim _inputLock = new(1, 1);
     private readonly ScreenSharePerformanceMonitor? _performance;
+    private readonly bool _screenV2Enabled;
     private Task? _runTask;
     private int _started;
     private int _stopped;
@@ -28,11 +30,13 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
     public bool IsControlActive => _session?.IsControlActive == true;
     public IRemoteChatSession? Chat => _session?.Chat;
 
-    public RemoteViewerPresenter(IScreenViewerSession session, ScreenSharePerformanceMonitor? performance = null)
-    { _session = session; _performance = performance; }
+    public RemoteViewerPresenter(IScreenViewerSession session, ScreenSharePerformanceMonitor? performance = null,
+        bool screenV2Enabled = false)
+    { _session = session; _performance = performance; _screenV2Enabled = screenV2Enabled; }
 
     public RemoteViewerPresenter(Func<CancellationToken, Action, Task<IScreenViewerSession>> connect,
-        ScreenSharePerformanceMonitor? performance = null) { _connect = connect; _performance = performance; }
+        ScreenSharePerformanceMonitor? performance = null, bool screenV2Enabled = false)
+    { _connect = connect; _performance = performance; _screenV2Enabled = screenV2Enabled; }
 
     public void Start()
     {
@@ -87,6 +91,7 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
         _performance?.Start();
         var timestamps = new Queue<long>();
         Bitmap? composite = null;
+        using var v2Composer = _screenV2Enabled ? new ScreenShareV2FrameComposer(_performance) : null;
         long lastSequence = -1;
         try
         {
@@ -95,54 +100,63 @@ internal sealed class RemoteViewerPresenter : IAsyncDisposable
                 var frame = await _session!.ReadScreenFrameAsync(cancellationToken).ConfigureAwait(false);
                 if (frame is not { } packet) break;
                 var receivedAt = Stopwatch.GetTimestamp();
-                if (packet.Sequence != lastSequence + 1)
+                if (!_screenV2Enabled && packet.Sequence != lastSequence + 1)
                     throw new InvalidDataException($"Screen frame sequence gap: expected {lastSequence + 1}, received {packet.Sequence}.");
 
-                if (packet.IsFullFrame)
+                Bitmap image;
+                if (v2Composer is not null)
                 {
-                    var decodeStarted = Stopwatch.GetTimestamp();
-                    var full = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
-                    _performance?.Decode(Stopwatch.GetTimestamp() - decodeStarted, packet.Jpeg.Length);
-                    if ((packet.Width != 0 && packet.Width != full.Width) ||
-                        (packet.Height != 0 && packet.Height != full.Height))
-                    {
-                        full.Dispose();
-                        throw new InvalidDataException("Full screen frame dimensions do not match its header.");
-                    }
-                    composite?.Dispose();
-                    composite = full;
+                    image = await v2Composer.ComposeAsync(packet, cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
-                    if (composite is null)
-                        throw new InvalidDataException("Received a screen delta before the first full frame.");
-                    var decodeStarted = Stopwatch.GetTimestamp();
-                    var patch = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
-                    _performance?.Decode(Stopwatch.GetTimestamp() - decodeStarted, packet.Jpeg.Length);
-                    try
+                    if (packet.IsFullFrame)
                     {
-                        if (patch.Width != packet.Width || patch.Height != packet.Height ||
-                            packet.X + patch.Width > composite.Width || packet.Y + patch.Height > composite.Height)
-                            throw new InvalidDataException("Screen delta rectangle is outside the current frame.");
-                        var compositeStarted = Stopwatch.GetTimestamp();
-                        using var graphics = Graphics.FromImage(composite);
-                        graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-                        graphics.DrawImageUnscaled(patch, packet.X, packet.Y);
-                        _performance?.Composite(Stopwatch.GetTimestamp() - compositeStarted);
+                        var decodeStarted = Stopwatch.GetTimestamp();
+                        var full = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
+                        _performance?.Decode(Stopwatch.GetTimestamp() - decodeStarted, packet.Jpeg.Length);
+                        if ((packet.Width != 0 && packet.Width != full.Width) ||
+                            (packet.Height != 0 && packet.Height != full.Height))
+                        {
+                            full.Dispose();
+                            throw new InvalidDataException("Full screen frame dimensions do not match its header.");
+                        }
+                        composite?.Dispose();
+                        composite = full;
                     }
-                    finally { patch.Dispose(); }
+                    else
+                    {
+                        if (composite is null)
+                            throw new InvalidDataException("Received a screen delta before the first full frame.");
+                        var decodeStarted = Stopwatch.GetTimestamp();
+                        var patch = await Task.Run(() => JpegFrameDecoder.Decode(packet.Jpeg), cancellationToken).ConfigureAwait(false);
+                        _performance?.Decode(Stopwatch.GetTimestamp() - decodeStarted, packet.Jpeg.Length);
+                        try
+                        {
+                            if (patch.Width != packet.Width || patch.Height != packet.Height ||
+                                packet.X + patch.Width > composite.Width || packet.Y + patch.Height > composite.Height)
+                                throw new InvalidDataException("Screen delta rectangle is outside the current frame.");
+                            var compositeStarted = Stopwatch.GetTimestamp();
+                            using var graphics = Graphics.FromImage(composite);
+                            graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                            graphics.DrawImageUnscaled(patch, packet.X, packet.Y);
+                            _performance?.Composite(Stopwatch.GetTimestamp() - compositeStarted);
+                        }
+                        finally { patch.Dispose(); }
+                    }
+                    lastSequence = packet.Sequence;
+
+                    var cloneStarted = Stopwatch.GetTimestamp();
+                    image = await Task.Run(() => (Bitmap)composite!.Clone(), cancellationToken).ConfigureAwait(false);
+                    _performance?.Clone(Stopwatch.GetTimestamp() - cloneStarted);
                 }
 
-                lastSequence = packet.Sequence;
                 var now = Stopwatch.GetTimestamp();
                 timestamps.Enqueue(now);
                 while (timestamps.Count > 1 && Stopwatch.GetElapsedTime(timestamps.Peek(), now) > TimeSpan.FromSeconds(1))
                     timestamps.Dequeue();
                 var fps = timestamps.Count < 2 ? 0 : (timestamps.Count - 1) / Stopwatch.GetElapsedTime(timestamps.Peek(), now).TotalSeconds;
-                var cloneStarted = Stopwatch.GetTimestamp();
-                var image = await Task.Run(() => (Bitmap)composite!.Clone(), cancellationToken).ConfigureAwait(false);
-                _performance?.Clone(Stopwatch.GetTimestamp() - cloneStarted);
-                var update = new RemoteViewerFrame(image, packet.Sequence, fps, composite.Width, composite.Height, receivedAt);
+                var update = new RemoteViewerFrame(image, packet.Sequence, fps, image.Width, image.Height, receivedAt);
                 var handler = FrameReceived;
                 if (handler is null) image.Dispose();
                 else
