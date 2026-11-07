@@ -20,11 +20,14 @@ public final class ClientAgentApplication {
         if (fingerprint == null || fingerprint.isBlank())
             throw new IllegalArgumentException("Set NETWORKADMIN_TLS_SERVER_SHA256 to the Admin certificate SHA-256 fingerprint.");
         String clientName = hostname();
-        ClientScreenShareWindow screenShareWindow = new ClientScreenShareWindow();
+        ClientScreenShareWindow screenShareWindow = new ClientScreenShareWindow(host, port);
         ClientDependencyConfig dependencies = new ClientDependencyConfig(host, port, fingerprint,
                 ClientAgentRuntime.localClientId(), clientName, screenShareWindow, screenShareWindow, screenShareWindow,
                 screenShareWindow::chatReceived, screenShareWindow::setChatSender);
-        Runtime.getRuntime().addShutdownHook(new Thread(dependencies::close, "network-admin-client-shutdown"));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            dependencies.close();
+            screenShareWindow.close();
+        }, "network-admin-client-shutdown"));
         dependencies.runtime().start();
         System.out.printf("NetworkAdmin Client started; connecting to %s:%d. Press Ctrl+C to stop.%n", host, port);
         new CountDownLatch(1).await();

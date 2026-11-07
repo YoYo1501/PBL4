@@ -131,7 +131,10 @@ public final class ClientScreenShareService implements ClientScreenShareMessageH
 
     public void connectionChanged(boolean connected) { view.connectionChanged(connected); }
 
-    @Override public void connected(ClientControlChannel source) { view.connectionChanged(true); }
+    @Override public void connected(ClientControlChannel source) {
+        view.connectionChanged(true);
+        view.sessionChanged(source.sessionId());
+    }
 
     @Override public void failed(Exception error) {
         String detail = error == null || error.getMessage() == null || error.getMessage().isBlank()
@@ -144,6 +147,7 @@ public final class ClientScreenShareService implements ClientScreenShareMessageH
         if (share != null && share.control == source) stop(source, share.requestId,
                 "Admin connection lost. Sharing will not resume automatically.", false);
         view.connectionChanged(false);
+        view.sessionChanged(null);
     }
 
     private void stop(ClientControlChannel source, String requestId, String reason, boolean notifyAdmin) {
