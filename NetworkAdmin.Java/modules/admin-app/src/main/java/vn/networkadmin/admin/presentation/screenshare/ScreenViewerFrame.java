@@ -29,6 +29,7 @@ public final class ScreenViewerFrame extends JFrame {
     public ScreenViewerFrame(String clientName, String clientId, String sessionId,
                              AdminScreenShareUseCases screenShare, AdminRemoteControlUseCases remoteControl) {
         super("Screen Viewer - " + clientName);
+        setIconImage(vn.networkadmin.admin.presentation.components.DashboardIcon.createGlobeImage(32, vn.networkadmin.admin.presentation.theme.AdminTheme.BLUE));
         this.clientId = clientId; this.sessionId = sessionId;
         this.screenShare = screenShare; this.remoteControl = remoteControl;
         setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);

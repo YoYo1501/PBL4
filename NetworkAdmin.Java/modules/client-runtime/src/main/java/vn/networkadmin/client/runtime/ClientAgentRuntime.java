@@ -133,8 +133,13 @@ public final class ClientAgentRuntime implements AutoCloseable, ClientConnection
             featureMessages.handle(active, message);
             return;
         }
+        if (message.type() == MessageType.REMOTE_ADMINISTRATION_COMMAND) {
+            featureMessages.handle(currentConnection(source), message);
+            return;
+        }
         if (message.type() == MessageType.REMOTE_ADMINISTRATION_CANCEL) {
             cancelScan(source, message);
+            featureMessages.handle(currentConnection(source), message);
             return;
         }
         if (message.type() == MessageType.PING_REQUEST) {
@@ -238,7 +243,17 @@ public final class ClientAgentRuntime implements AutoCloseable, ClientConnection
     }
 
     private Map<String, Object> networkInfoPayload() {
-        List<Map<String, Object>> interfaces = inventory.interfaces().stream().map(info -> {
+        List<NetworkInterfaceInfo> available = inventory.interfaces();
+        NetworkInterfaceInfo active = available.stream().filter(info -> !info.virtual())
+                .filter(info -> info.ipAddress() != null && !info.ipAddress().isBlank())
+                .min(java.util.Comparator.comparing((NetworkInterfaceInfo info) -> info.gateway() == null || info.gateway().isBlank())
+                        .thenComparing(info -> {
+                            String name = (info.name() + " " + info.description()).toLowerCase(java.util.Locale.ROOT);
+                            return !(name.contains("wi-fi") || name.contains("wifi") || name.contains("wireless") || name.contains("ethernet") || name.contains("eth"));
+                        }))
+                .orElseGet(() -> available.stream().filter(info -> info.ipAddress() != null && !info.ipAddress().isBlank())
+                        .findFirst().orElse(null));
+        List<Map<String, Object>> interfaces = active == null ? List.of() : List.of(active).stream().map(info -> {
             Map<String, Object> mapped = new LinkedHashMap<>();
             mapped.put("name", info.name()); mapped.put("description", info.description());
             mapped.put("ipAddress", info.ipAddress()); mapped.put("macAddress", info.macAddress());

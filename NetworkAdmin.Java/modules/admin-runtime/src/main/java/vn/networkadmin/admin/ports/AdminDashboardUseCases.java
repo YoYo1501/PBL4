@@ -18,5 +18,9 @@ public interface AdminDashboardUseCases extends AutoCloseable {
     Map<String, Object> scan(String sessionId, String subnet, int timeoutMs, long timeout, TimeUnit unit)
             throws IOException, InterruptedException, TimeoutException;
     default void cancelScan(String sessionId) throws IOException { }
+    default String remoteAdministration(String sessionId, int command, int countdownSeconds) throws IOException {
+        throw new UnsupportedOperationException("Remote administration commands are unavailable.");
+    }
+    default Map<String, Object> remoteAdministrationResult(String sessionId) { return Map.of(); }
     @Override void close();
 }

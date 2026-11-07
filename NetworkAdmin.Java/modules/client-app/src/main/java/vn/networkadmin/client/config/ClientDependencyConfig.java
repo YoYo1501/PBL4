@@ -7,6 +7,9 @@ import vn.networkadmin.client.application.ClientFeatureMessages;
 import vn.networkadmin.client.application.chat.ClientChatService;
 import vn.networkadmin.client.application.chat.ClientChatUseCases;
 import vn.networkadmin.client.application.remotecontrol.ClientRemoteControlService;
+import vn.networkadmin.client.application.remoteadministration.ClientRemoteAdministrationService;
+import vn.networkadmin.client.application.remoteadministration.RemoteAdministrationClientView;
+import vn.networkadmin.client.infrastructure.remoteadministration.WindowsRemoteAdministrationAdapter;
 import vn.networkadmin.client.application.remotecontrol.RemoteControlClientView;
 import vn.networkadmin.client.infrastructure.remotecontrol.AwtRemoteInputAdapter;
 import vn.networkadmin.client.infrastructure.screenshare.PinnedTlsScreenFrameSenderFactory;
@@ -48,10 +51,12 @@ public final class ClientDependencyConfig implements AutoCloseable {
     private final ClientScreenShareService screenShare;
     private final ClientRemoteControlService remoteControl;
     private final ClientChatService chat;
+    private final ClientRemoteAdministrationService remoteAdministration;
     private final ExecutorService inputWorkers;
 
     public ClientDependencyConfig(String host, int port, String fingerprint, String clientId, String clientName,
                                   ScreenShareClientView screenShareView, RemoteControlClientView remoteControlView,
+                                  RemoteAdministrationClientView remoteAdministrationView,
                                   java.util.function.Consumer<ClientChatUseCases.ChatMessage> chatReceiver,
                                   java.util.function.Consumer<java.util.function.Consumer<String>> chatSenderSink) {
         var inventory = new SystemNetworkInventoryAdapter();
@@ -70,11 +75,13 @@ public final class ClientDependencyConfig implements AutoCloseable {
                 }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
         this.remoteControl = new ClientRemoteControlService(clientId, remoteControlView,
                 new AwtRemoteInputAdapter(), inputWorkers);
+        this.remoteAdministration = new ClientRemoteAdministrationService(clientId, remoteAdministrationView,
+                new WindowsRemoteAdministrationAdapter(), heartbeatScheduler);
         this.chat = new ClientChatService(clientId, clientName, chatReceiver);
         chatSenderSink.accept(chat::send);
         this.runtime = new ClientAgentRuntime(clientId, clientName, inventory, ping, scanner,
                 commandWorkers, publisherScheduler, connections, screenShare,
-                new ClientFeatureMessages(remoteControl, chat));
+                new ClientFeatureMessages(remoteControl, chat, remoteAdministration));
     }
 
     public ClientAgentRuntime runtime() { return runtime; }

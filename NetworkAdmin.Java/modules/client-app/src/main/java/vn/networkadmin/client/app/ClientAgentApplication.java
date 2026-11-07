@@ -22,7 +22,7 @@ public final class ClientAgentApplication {
         String clientName = hostname();
         ClientScreenShareWindow screenShareWindow = new ClientScreenShareWindow();
         ClientDependencyConfig dependencies = new ClientDependencyConfig(host, port, fingerprint,
-                ClientAgentRuntime.localClientId(), clientName, screenShareWindow, screenShareWindow,
+                ClientAgentRuntime.localClientId(), clientName, screenShareWindow, screenShareWindow, screenShareWindow,
                 screenShareWindow::chatReceived, screenShareWindow::setChatSender);
         Runtime.getRuntime().addShutdownHook(new Thread(dependencies::close, "network-admin-client-shutdown"));
         dependencies.runtime().start();

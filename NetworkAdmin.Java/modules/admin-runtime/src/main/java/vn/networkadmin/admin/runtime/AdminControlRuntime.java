@@ -24,6 +24,7 @@ public final class AdminControlRuntime implements AdminDashboardUseCases, Contro
     private final ConcurrentHashMap<String, ClientState> knownClients = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PendingResponse> pending = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> activeScans = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Map<String, Object>> remoteAdministrationResults = new ConcurrentHashMap<>();
     private final ControlServerPort server;
     private final SessionMessageSender sender;
     private final AdminScreenShareMessageHandler screenShareMessages;
@@ -99,6 +100,24 @@ public final class AdminControlRuntime implements AdminDashboardUseCases, Contro
         sendScanCancellation(sessionId, requestId);
     }
 
+    /** Sends an allow-listed remote administration command through the pinned TLS control session. */
+    @Override public String remoteAdministration(String sessionId, int command, int countdownSeconds) throws IOException {
+        if (command != 2 && command != 3 && command != 4)
+            throw new IllegalArgumentException("Only Shutdown (2), Restart (3), and Windows Lock (4) are supported.");
+        if ((command == 2 || command == 3) && (countdownSeconds < 5 || countdownSeconds > 60))
+            throw new IllegalArgumentException("Power command countdown must be between 5 and 60 seconds.");
+        ClientSession session = sessions.get(sessionId);
+        if (session == null || !session.isReady()) throw new IOException("Client session is not connected.");
+        String requestId = UUID.randomUUID().toString().replace("-", "");
+        sender.send(sessionId, MessageType.REMOTE_ADMINISTRATION_COMMAND, requestId,
+                Map.of("command", command, "countdownSeconds", countdownSeconds));
+        return requestId;
+    }
+
+    @Override public Map<String, Object> remoteAdministrationResult(String sessionId) {
+        return remoteAdministrationResults.getOrDefault(sessionId, Map.of());
+    }
+
     private Map<String, Object> request(String sessionId, MessageType type, Object payload, long timeout, TimeUnit unit,
                                         MessageType expectedResponse)
             throws IOException, InterruptedException, TimeoutException {
@@ -148,6 +167,12 @@ public final class AdminControlRuntime implements AdminDashboardUseCases, Contro
         }
         if (!(message.data() instanceof Map<?, ?> raw)) return;
         Map<String, Object> payload = stringKeyMap(raw);
+        if (message.type() == MessageType.REMOTE_ADMINISTRATION_RESULT) {
+            Map<String, Object> result = new LinkedHashMap<>(payload);
+            result.put("requestId", message.requestId());
+            remoteAdministrationResults.put(session.sessionId(), Collections.unmodifiableMap(result));
+            return;
+        }
         switch (message.type()) {
             case SYSTEM_STATS -> update(session, state -> state.systemStats.set(payload));
             case NETWORK_INFO -> update(session, state -> state.networkInfo.set(payload));
