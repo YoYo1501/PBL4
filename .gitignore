@@ -4,6 +4,8 @@
 # .NET build
 bin/
 obj/
+**/build/
+.gradle/
 **/bin/
 **/obj/
 
@@ -27,3 +29,8 @@ artifacts/layout/
 *.suo
 *.userosscache
 *.sln.docstates
+
+# Local Java TLS credentials and environment
+NetworkAdmin.Java/local-test.p12
+NetworkAdmin.Java/local-test.cer
+NetworkAdmin.Java/.env.local

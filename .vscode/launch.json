@@ -2,12 +2,33 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "type": "java",
+      "name": "ClientAgentApplication",
+      "request": "launch",
+      "mainClass": "vn.networkadmin.client.app.ClientAgentApplication",
+      "projectName": "",
+      "envFile": "${workspaceFolder}/NetworkAdmin.Java/.env.local"
+    },
+    {
+      "type": "java",
+      "name": "AdminApplication",
+      "request": "launch",
+      "mainClass": "vn.networkadmin.admin.app.AdminApplication",
+      "projectName": "",
+      "envFile": "${workspaceFolder}/NetworkAdmin.Java/.env.local"
+    },
+    {
       "name": "NetworkAdmin Server",
       "type": "coreclr",
       "request": "launch",
       "program": "${workspaceFolder}/NetworkAdmin.Server/bin/Debug/net10.0-windows/NetworkAdmin.Server.dll",
       "cwd": "${workspaceFolder}/NetworkAdmin.Server",
-      "args": ["--host", "0.0.0.0", "--port", "5000"],
+      "args": [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "5000"
+      ],
       "env": {
         "NETWORKADMIN_ADMIN_TOKEN": "test-token-123"
       }
@@ -18,13 +39,23 @@
       "request": "launch",
       "program": "${workspaceFolder}/NetworkAdmin.Client/bin/Debug/net10.0-windows/NetworkAdmin.Client.dll",
       "cwd": "${workspaceFolder}/NetworkAdmin.Client",
-      "args": ["--host", "127.0.0.1", "--port", "5000"],
+      "args": [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5000"
+      ],
       "env": {
         "NETWORKADMIN_ADMIN_TOKEN": "test-token-123"
       }
     }
   ],
   "compounds": [
+    {
+      "name": "NetworkAdmin Java Admin + Client",
+      "configurations": ["AdminApplication", "ClientAgentApplication"],
+      "stopAll": true
+    },
     {
       "name": "NetworkAdmin Server + Client",
       "configurations": ["NetworkAdmin Server", "NetworkAdmin Client"]
