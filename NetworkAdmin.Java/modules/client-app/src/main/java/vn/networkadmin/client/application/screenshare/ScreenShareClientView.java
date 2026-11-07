@@ -10,4 +10,5 @@ public interface ScreenShareClientView {
     void connectionChanged(boolean connected);
     default void connectionFailed(String reason) { }
     default void clientIdentity(String name, String clientId) { }
+    default void sessionChanged(String sessionId) { }
 }
