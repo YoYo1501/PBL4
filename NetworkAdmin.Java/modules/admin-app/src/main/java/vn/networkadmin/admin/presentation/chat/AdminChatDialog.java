@@ -21,6 +21,7 @@ public final class AdminChatDialog extends JDialog {
 
     public AdminChatDialog(Window owner, String clientName, String clientId, String sessionId, AdminChatPresenter presenter) {
         super(owner, "Chat - " + clientName, ModalityType.MODELESS);
+        setIconImage(vn.networkadmin.admin.presentation.components.DashboardIcon.createGlobeImage(32, vn.networkadmin.admin.presentation.theme.AdminTheme.BLUE));
         this.clientId = clientId; this.sessionId = sessionId; this.presenter = presenter;
         transcript.setEditable(false); transcript.setLineWrap(true); transcript.setWrapStyleWord(true);
         JButton send = new JButton("Send"); send.addActionListener(event -> send()); input.addActionListener(event -> send());

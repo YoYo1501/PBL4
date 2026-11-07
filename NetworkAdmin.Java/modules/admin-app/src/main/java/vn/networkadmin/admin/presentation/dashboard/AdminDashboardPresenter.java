@@ -45,6 +45,17 @@ public final class AdminDashboardPresenter implements AutoCloseable {
         }, backgroundExecutor);
     }
 
+    public CompletableFuture<String> remoteAdministration(String sessionId, int command, int countdownSeconds) {
+        return CompletableFuture.supplyAsync(() -> {
+            try { return useCases.remoteAdministration(sessionId, command, countdownSeconds); }
+            catch (Exception error) { throw new java.util.concurrent.CompletionException(error); }
+        }, backgroundExecutor);
+    }
+
+    public CompletableFuture<Map<String, Object>> remoteAdministrationResult(String sessionId) {
+        return CompletableFuture.supplyAsync(() -> useCases.remoteAdministrationResult(sessionId), backgroundExecutor);
+    }
+
     @Override public void close() { useCases.close(); }
 
     public record DashboardState(boolean listening, List<AdminClientSnapshot> clients) {
