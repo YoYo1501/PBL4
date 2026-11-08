@@ -35,8 +35,8 @@ public final class AdminApplication {
                     : config.screenHost();
             AdminDependencyConfig dependencies = new AdminDependencyConfig(tls, options, screenHost, config.screenPort());
             AdminControlRuntime runtime = dependencies.runtime();
-            String displayHost = config.host().equals("0.0.0.0") ? "all network interfaces" : config.host();
-            String address = displayHost + ":" + config.port() + " | TLS";
+            String displayHost = config.host().equals("0.0.0.0") ? "All network interfaces" : config.host();
+            String address = displayHost + ": " + config.port() + " | TLS";
 
             Thread listener = new Thread(() -> {
                 try { runtime.run(); }
@@ -54,7 +54,8 @@ public final class AdminApplication {
 
             SwingUtilities.invokeLater(() -> {
                 AdminDashboardFrame frame = new AdminDashboardFrame(dependencies.presenter(), dependencies.screenShare(),
-                        dependencies.remoteControl(), dependencies.chatPresenter(), address, dependencies::close);
+                        dependencies.remoteControl(), dependencies.chatPresenter(), address,
+                        System.getenv("NETWORKADMIN_TLS_SERVER_SHA256"), dependencies::close);
                 frame.setVisible(true);
             });
         } catch (Exception error) {

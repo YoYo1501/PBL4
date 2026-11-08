@@ -32,8 +32,12 @@ public final class AdminDashboardPresenter implements AutoCloseable {
     }
 
     public CompletableFuture<Map<String, Object>> scan(String sessionId, String subnet) {
+        return scan(sessionId, subnet, 800);
+    }
+
+    public CompletableFuture<Map<String, Object>> scan(String sessionId, String subnet, int timeoutMs) {
         return CompletableFuture.supplyAsync(() -> {
-            try { return useCases.scan(sessionId, subnet, 800, 90, TimeUnit.SECONDS); }
+            try { return useCases.scan(sessionId, subnet, timeoutMs, 90, TimeUnit.SECONDS); }
             catch (Exception error) { throw new java.util.concurrent.CompletionException(error); }
         }, backgroundExecutor);
     }
