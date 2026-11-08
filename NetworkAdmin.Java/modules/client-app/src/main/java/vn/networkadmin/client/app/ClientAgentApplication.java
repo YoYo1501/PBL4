@@ -13,6 +13,10 @@ public final class ClientAgentApplication {
 
     public static void main(String[] args) throws InterruptedException {
         String host = setting(args, "host", "NETWORKADMIN_SERVER_HOST", "127.0.0.1");
+        if (isWildcardAddress(host)) {
+            throw new IllegalArgumentException(
+                    "Client cannot connect to " + host + ". Set NETWORKADMIN_SERVER_HOST to 127.0.0.1 or the Admin machine's LAN IP.");
+        }
         int port;
         try { port = Integer.parseInt(setting(args, "port", "NETWORKADMIN_SERVER_PORT", "5000")); }
         catch (NumberFormatException error) { throw new IllegalArgumentException("Server port must be a number.", error); }
@@ -20,14 +24,21 @@ public final class ClientAgentApplication {
         if (fingerprint == null || fingerprint.isBlank())
             throw new IllegalArgumentException("Set NETWORKADMIN_TLS_SERVER_SHA256 to the Admin certificate SHA-256 fingerprint.");
         String clientName = hostname();
-        ClientScreenShareWindow screenShareWindow = new ClientScreenShareWindow();
+        ClientScreenShareWindow screenShareWindow = new ClientScreenShareWindow(host, port);
         ClientDependencyConfig dependencies = new ClientDependencyConfig(host, port, fingerprint,
                 ClientAgentRuntime.localClientId(), clientName, screenShareWindow, screenShareWindow, screenShareWindow,
                 screenShareWindow::chatReceived, screenShareWindow::setChatSender);
-        Runtime.getRuntime().addShutdownHook(new Thread(dependencies::close, "network-admin-client-shutdown"));
+        CountDownLatch stopped = new CountDownLatch(1);
+        screenShareWindow.setDisconnectAction(() -> {
+            dependencies.close();
+            stopped.countDown();
+        });
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            screenShareWindow.close();
+        }, "network-admin-client-shutdown"));
         dependencies.runtime().start();
         System.out.printf("NetworkAdmin Client started; connecting to %s:%d. Press Ctrl+C to stop.%n", host, port);
-        new CountDownLatch(1).await();
+        stopped.await();
     }
 
     private static String setting(String[] args, String name, String environment, String fallback) {
@@ -40,5 +51,9 @@ public final class ClientAgentApplication {
     private static String hostname() {
         try { return InetAddress.getLocalHost().getHostName(); }
         catch (Exception error) { return System.getenv().getOrDefault("COMPUTERNAME", "NetworkAdmin Client"); }
+    }
+
+    private static boolean isWildcardAddress(String host) {
+        return "0.0.0.0".equals(host) || "::".equals(host) || "0:0:0:0:0:0:0:0".equals(host);
     }
 }
