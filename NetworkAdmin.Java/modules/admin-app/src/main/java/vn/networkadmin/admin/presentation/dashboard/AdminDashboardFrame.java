@@ -119,6 +119,8 @@ public final class AdminDashboardFrame extends JFrame {
 
     private final JButton headerChatButton = createHeaderChatButton();
     private final java.util.Set<String> readMessageIds = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    private final java.util.Set<String> openChatSessions = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    private final java.util.Map<String, Integer> unreadBySession = new java.util.concurrent.ConcurrentHashMap<>();
     private int unreadChatCount = 0;
     private JButton sidebarChatButton;
     private JButton sidebarViewScreenButton;
@@ -265,6 +267,17 @@ public final class AdminDashboardFrame extends JFrame {
                     statusLbl.setFont(AdminTheme.MEDIUM);
                     statusLbl.setForeground(choice.online ? AdminTheme.GREEN : AdminTheme.PINK);
                     panel.add(statusLbl);
+
+                    int unread = unreadBySession.getOrDefault(choice.sessionId, 0);
+                    if (unread > 0) {
+                        JLabel unreadLbl = new JLabel(unread > 99 ? "99+" : Integer.toString(unread));
+                        unreadLbl.setOpaque(true);
+                        unreadLbl.setBackground(AdminTheme.PINK);
+                        unreadLbl.setForeground(Color.WHITE);
+                        unreadLbl.setFont(new Font("Segoe UI", Font.BOLD, 10));
+                        unreadLbl.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
+                        panel.add(unreadLbl);
+                    }
 
                     JLabel sep2 = new JLabel("|");
                     sep2.setForeground(new Color(203, 213, 225));
@@ -2413,12 +2426,17 @@ public final class AdminDashboardFrame extends JFrame {
                             unread++;
                         }
                     }
-                    final int count = unread;
-                    SwingUtilities.invokeLater(() -> updateUnreadChatCount(count));
+                    final int count = openChatSessions.contains(client.sessionId()) ? 0 : unread;
+                    SwingUtilities.invokeLater(() -> {
+                        unreadBySession.put(client.sessionId(), count);
+                        updateUnreadChatCount(unreadBySession.values().stream().mapToInt(Integer::intValue).sum());
+                        clientPicker.repaint();
+                    });
                 }
             });
         }
         if (clients.isEmpty()) {
+            unreadBySession.clear();
             updateUnreadChatCount(0);
         }
     }
@@ -2866,17 +2884,41 @@ public final class AdminDashboardFrame extends JFrame {
     }
 
     private void openChat() {
-        AdminClientSnapshot selected = selectedClient();
+        AdminClientSnapshot selected = currentClients.stream()
+                .filter(client -> unreadBySession.getOrDefault(client.sessionId(), 0) > 0)
+                .max(java.util.Comparator.comparingInt(client -> unreadBySession.getOrDefault(client.sessionId(), 0)))
+                .orElseGet(this::selectedClient);
         if (selected == null) return;
+        if (!selected.sessionId().equals(selectedSessionId())) {
+            for (int i = 0; i < clientPicker.getItemCount(); i++) {
+                if (clientPicker.getItemAt(i).sessionId.equals(selected.sessionId())) {
+                    clientPicker.setSelectedIndex(i);
+                    break;
+                }
+            }
+        }
         chatPresenter.messages(selected.sessionId()).whenComplete((messages, err) -> {
             if (err == null && messages != null) {
                 for (var msg : messages) {
                     readMessageIds.add(msg.messageId());
                 }
             }
-            SwingUtilities.invokeLater(() -> updateUnreadChatCount(0));
+            SwingUtilities.invokeLater(() -> {
+                unreadBySession.put(selected.sessionId(), 0);
+                updateUnreadChatCount(unreadBySession.values().stream().mapToInt(Integer::intValue).sum());
+                clientPicker.repaint();
+            });
         });
         AdminChatDialog dialog = new AdminChatDialog(this, selected.clientName(), selected.clientId(), selected.sessionId(), chatPresenter);
+        openChatSessions.add(selected.sessionId());
+        unreadBySession.put(selected.sessionId(), 0);
+        updateUnreadChatCount(unreadBySession.values().stream().mapToInt(Integer::intValue).sum());
+        clientPicker.repaint();
+        dialog.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowClosed(java.awt.event.WindowEvent event) {
+                openChatSessions.remove(selected.sessionId());
+            }
+        });
         dialog.setVisible(true);
     }
 
