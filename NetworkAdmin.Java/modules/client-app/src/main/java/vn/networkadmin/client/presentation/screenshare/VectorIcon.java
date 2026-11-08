@@ -15,7 +15,7 @@ import java.awt.geom.RoundRectangle2D;
 
 /** Font-independent vector icon set for the Swing client UI. */
 public final class VectorIcon implements Icon {
-    public enum Type { LOGO, DASHBOARD, CHAT, NETWORK, LOGS, SETTINGS, ABOUT, CONNECTION, SESSION, CLIENT, SCREEN, CONTROL, CALENDAR, TRAFFIC, PERFORMANCE, WORKSTATION, COMPUTER, OS, CPU, RAM, RESOLUTION, WIFI, MAC, SEND, STOP, REVOKE, DOT, CLOCK }
+    public enum Type { LOGO, DASHBOARD, CHAT, NETWORK, LOGS, SETTINGS, ABOUT, CONNECTION, SESSION, CLIENT, SCREEN, CONTROL, CALENDAR, TRAFFIC, PERFORMANCE, WORKSTATION, COMPUTER, OS, CPU, RAM, RESOLUTION, WIFI, MAC, SEND, STOP, LOCK, REVOKE, DOT, CLOCK }
 
     private final Type type;
     private final int size;
@@ -48,6 +48,7 @@ public final class VectorIcon implements Icon {
             case MAC -> { c.round(s*.18f,s*.25f,s*.64f,s*.5f,s*.08f); c.line(s*.3f,s*.25f,s*.3f,s*.75f); c.line(s*.5f,s*.25f,s*.5f,s*.75f); c.line(s*.7f,s*.25f,s*.7f,s*.75f); }
             case SEND -> { c.fillRound(s*.12f,s*.2f,s*.76f,s*.6f,s*.13f); g.setColor(Color.WHITE); c.line(s*.28f,s*.5f,s*.72f,s*.5f); c.line(s*.57f,s*.35f,s*.72f,s*.5f); c.line(s*.57f,s*.65f,s*.72f,s*.5f); }
             case STOP -> c.fillRect(s*.23f,s*.23f,s*.54f,s*.54f);
+            case LOCK -> { c.round(s*.23f,s*.43f,s*.54f,s*.4f,s*.05f); c.arc(s*.34f,s*.16f,s*.32f,s*.45f,0,180); c.line(s*.5f,s*.58f,s*.5f,s*.68f); }
             case REVOKE -> { c.oval(s*.16f,s*.16f,s*.68f,s*.68f); c.line(s*.3f,s*.5f,s*.7f,s*.5f); }
             case CLOCK -> { c.oval(s*.15f,s*.15f,s*.7f,s*.7f); c.line(s*.5f,s*.5f,s*.5f,s*.3f); c.line(s*.5f,s*.5f,s*.67f,s*.6f); }
         }

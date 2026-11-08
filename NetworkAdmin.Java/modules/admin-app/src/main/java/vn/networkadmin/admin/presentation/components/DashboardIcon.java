@@ -11,7 +11,8 @@ public final class DashboardIcon implements Icon {
         GLOBE, DASHBOARD, CLIENTS, SCAN, PING, MONITORING, SETTINGS, ABOUT,
         SCREEN, POWER, CHAT, CLOCK, PEOPLE, REFRESH, DISCONNECT,
         WINDOWS, ID_CARD, CALENDAR, WIFI, CPU, RAM, LAPTOP,
-        CHECK_CIRCLE, X_CIRCLE, LAYERS, JAVA, PLAY, CROSS,
+        CHECK_CIRCLE, X_CIRCLE, LAYERS, JAVA, CODE, PLAY, CROSS,
+        SERVER, SHIELD, CERTIFICATE, KEY, LOCK, COPY, EYE_OFF, RADIO,
         EMPTY_SCAN, EMPTY_PING
     }
 
@@ -74,8 +75,17 @@ public final class DashboardIcon implements Icon {
             case X_CIRCLE -> paintXCircle(g);
             case LAYERS -> paintLayers(g);
             case JAVA -> paintJava(g);
+            case CODE -> paintCode(g);
             case PLAY -> paintPlay(g);
             case CROSS -> paintCross(g);
+            case SERVER -> paintServer(g);
+            case SHIELD -> paintShield(g);
+            case CERTIFICATE -> paintCertificate(g);
+            case KEY -> paintKey(g);
+            case LOCK -> paintLock(g);
+            case COPY -> paintCopy(g);
+            case EYE_OFF -> paintEyeOff(g);
+            case RADIO -> paintRadio(g);
             case EMPTY_SCAN -> paintEmptyScan(g);
             case EMPTY_PING -> paintEmptyPing(g);
         }
@@ -176,17 +186,14 @@ public final class DashboardIcon implements Icon {
     }
 
     private static void paintSettings(Graphics2D g) {
-        // Gear icon
-        g.drawOval(11, 11, 14, 14);
-        g.drawOval(15, 15, 6, 6);
+        Area gear = new Area(new Ellipse2D.Double(7, 7, 22, 22));
         for (int i = 0; i < 8; i++) {
-            double angle = i * Math.PI / 4.0;
-            int x1 = (int) (18 + 10 * Math.cos(angle));
-            int y1 = (int) (18 + 10 * Math.sin(angle));
-            int x2 = (int) (18 + 14 * Math.cos(angle));
-            int y2 = (int) (18 + 14 * Math.sin(angle));
-            g.drawLine(x1, y1, x2, y2);
+            Rectangle2D tooth = new Rectangle2D.Double(15, 2, 6, 10);
+            AffineTransform rotation = AffineTransform.getRotateInstance(i * Math.PI / 4.0, 18, 18);
+            gear.add(new Area(rotation.createTransformedShape(tooth)));
         }
+        gear.subtract(new Area(new Ellipse2D.Double(13, 13, 10, 10)));
+        g.draw(gear);
     }
 
     private static void paintAbout(Graphics2D g) {
@@ -344,6 +351,13 @@ public final class DashboardIcon implements Icon {
         g.drawArc(16, 5, 4, 6, 90, 180);
     }
 
+    private static void paintCode(Graphics2D g) {
+        g.drawLine(14, 11, 7, 18);
+        g.drawLine(7, 18, 14, 25);
+        g.drawLine(22, 11, 29, 18);
+        g.drawLine(29, 18, 22, 25);
+    }
+
     private static void paintPlay(Graphics2D g) {
         Path2D p = new Path2D.Double();
         p.moveTo(13, 9);
@@ -356,6 +370,89 @@ public final class DashboardIcon implements Icon {
     private static void paintCross(Graphics2D g) {
         g.drawLine(10, 10, 26, 26);
         g.drawLine(26, 10, 10, 26);
+    }
+
+    private static void paintServer(Graphics2D g) {
+        for (int y : new int[]{5, 14, 23}) {
+            g.drawRoundRect(5, y, 26, 7, 2, 2);
+            g.fillOval(9, y + 2, 3, 3);
+            g.drawLine(16, y + 3, 27, y + 3);
+        }
+    }
+
+    private static void paintShield(Graphics2D g) {
+        Path2D shield = new Path2D.Double();
+        shield.moveTo(18, 4); shield.lineTo(30, 9); shield.lineTo(29, 20);
+        shield.curveTo(28, 26, 23, 30, 18, 33);
+        shield.curveTo(13, 30, 8, 26, 7, 20); shield.lineTo(6, 9); shield.closePath();
+        g.draw(shield);
+        g.drawLine(12, 18, 16, 22);
+        g.drawLine(16, 22, 24, 13);
+    }
+
+    private static void paintCertificate(Graphics2D g) {
+        g.drawOval(7, 4, 22, 22);
+        g.drawOval(12, 9, 12, 12);
+        g.drawLine(12, 24, 10, 32);
+        g.drawLine(10, 32, 17, 28);
+        g.drawLine(24, 24, 26, 32);
+        g.drawLine(26, 32, 19, 28);
+    }
+
+    private static void paintKey(Graphics2D g) {
+        g.drawOval(5, 7, 16, 16);
+        g.drawLine(18, 20, 30, 32);
+        g.drawLine(24, 26, 28, 22);
+        g.drawLine(27, 29, 31, 25);
+        g.fillOval(10, 12, 6, 6);
+    }
+
+    private static void paintLock(Graphics2D g) {
+        g.drawRoundRect(8, 16, 20, 16, 2, 2);
+        Path2D shackle = new Path2D.Double();
+        shackle.moveTo(12, 16);
+        shackle.lineTo(12, 12);
+        shackle.curveTo(12, 4, 24, 4, 24, 12);
+        shackle.lineTo(24, 16);
+        g.draw(shackle);
+        g.fillOval(16, 21, 4, 4);
+        g.drawLine(18, 24, 18, 28);
+    }
+
+    private static void paintCopy(Graphics2D g) {
+        g.drawRoundRect(11, 9, 17, 21, 3, 3);
+        g.drawLine(15, 5, 7, 5); g.drawLine(7, 5, 7, 25); g.drawLine(7, 25, 10, 25);
+        g.drawLine(15, 14, 24, 14); g.drawLine(15, 19, 24, 19);
+    }
+
+    private static void paintEyeOff(Graphics2D g) {
+        Path2D eye = new Path2D.Double();
+        eye.moveTo(4, 18); eye.curveTo(10, 9, 25, 8, 32, 18); eye.curveTo(26, 27, 12, 28, 4, 18);
+        g.draw(eye);
+        g.drawOval(14, 14, 8, 8);
+        g.drawLine(5, 5, 31, 31);
+    }
+
+    private static void paintRadio(Graphics2D g) {
+        g.fillOval(15, 4, 6, 6);
+        g.drawLine(18, 10, 18, 31);
+        g.drawLine(14, 31, 22, 31);
+        Path2D leftInner = new Path2D.Double();
+        leftInner.moveTo(12, 12);
+        leftInner.curveTo(7, 15, 7, 21, 12, 24);
+        g.draw(leftInner);
+        Path2D rightInner = new Path2D.Double();
+        rightInner.moveTo(24, 12);
+        rightInner.curveTo(29, 15, 29, 21, 24, 24);
+        g.draw(rightInner);
+        Path2D leftOuter = new Path2D.Double();
+        leftOuter.moveTo(7, 7);
+        leftOuter.curveTo(0, 13, 0, 23, 7, 29);
+        g.draw(leftOuter);
+        Path2D rightOuter = new Path2D.Double();
+        rightOuter.moveTo(29, 7);
+        rightOuter.curveTo(36, 13, 36, 23, 29, 29);
+        g.draw(rightOuter);
     }
 
     private static void paintEmptyScan(Graphics2D g) {

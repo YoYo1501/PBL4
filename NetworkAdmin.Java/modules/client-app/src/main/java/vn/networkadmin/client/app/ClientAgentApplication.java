@@ -13,6 +13,10 @@ public final class ClientAgentApplication {
 
     public static void main(String[] args) throws InterruptedException {
         String host = setting(args, "host", "NETWORKADMIN_SERVER_HOST", "127.0.0.1");
+        if (isWildcardAddress(host)) {
+            throw new IllegalArgumentException(
+                    "Client cannot connect to " + host + ". Set NETWORKADMIN_SERVER_HOST to 127.0.0.1 or the Admin machine's LAN IP.");
+        }
         int port;
         try { port = Integer.parseInt(setting(args, "port", "NETWORKADMIN_SERVER_PORT", "5000")); }
         catch (NumberFormatException error) { throw new IllegalArgumentException("Server port must be a number.", error); }
@@ -43,5 +47,9 @@ public final class ClientAgentApplication {
     private static String hostname() {
         try { return InetAddress.getLocalHost().getHostName(); }
         catch (Exception error) { return System.getenv().getOrDefault("COMPUTERNAME", "NetworkAdmin Client"); }
+    }
+
+    private static boolean isWildcardAddress(String host) {
+        return "0.0.0.0".equals(host) || "::".equals(host) || "0:0:0:0:0:0:0:0".equals(host);
     }
 }

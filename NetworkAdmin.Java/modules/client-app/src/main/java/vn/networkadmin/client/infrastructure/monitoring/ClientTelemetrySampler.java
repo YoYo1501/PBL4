@@ -30,10 +30,7 @@ public final class ClientTelemetrySampler {
     private final JvmSystemStatsSampler systemStats = new JvmSystemStatsSampler();
     private final OperatingSystemMXBean operatingSystem;
     private final SystemNetworkInventoryAdapter inventory = new SystemNetworkInventoryAdapter();
-    private long previousReceived;
-    private long previousSent;
-    private long previousNetworkNanos;
-    private boolean networkInitialized;
+    private final NetworkTrafficRateCalculator networkRateCalculator = new NetworkTrafficRateCalculator();
     private volatile String cachedCpuModel;
     private volatile String cachedScreenResolution;
 
@@ -72,17 +69,9 @@ public final class ClientTelemetrySampler {
     private NetworkRate networkRate() {
         long[] counters = readNetworkCounters();
         if (counters == null) return NetworkRate.EMPTY;
-        long now = System.nanoTime();
-        if (!networkInitialized || now <= previousNetworkNanos) {
-            previousReceived = counters[0]; previousSent = counters[1]; previousNetworkNanos = now;
-            networkInitialized = true;
-            return NetworkRate.EMPTY;
-        }
-        double seconds = (now - previousNetworkNanos) / 1_000_000_000.0;
-        double down = Math.max(0, counters[0] - previousReceived) * 8.0 / seconds / 1_000_000.0;
-        double up = Math.max(0, counters[1] - previousSent) * 8.0 / seconds / 1_000_000.0;
-        previousReceived = counters[0]; previousSent = counters[1]; previousNetworkNanos = now;
-        return new NetworkRate(Math.min(down, 100_000), Math.min(up, 100_000));
+        NetworkTrafficRateCalculator.Rate rate = networkRateCalculator.sample(
+                counters[0], counters[1], System.nanoTime());
+        return new NetworkRate(rate.downloadMbps(), rate.uploadMbps());
     }
 
     private long[] readNetworkCounters() {
@@ -94,20 +83,56 @@ public final class ClientTelemetrySampler {
     private long[] readWindowsNetworkCounters() {
         Process process = null;
         try {
-            String script = "$s=Get-NetAdapterStatistics -ErrorAction SilentlyContinue; "
-                    + "if($s){($s|Measure-Object -Property ReceivedBytes -Sum).Sum;($s|Measure-Object -Property SentBytes -Sum).Sum}";
+            String script = "$names=@(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue "
+                    + "|Where-Object {$_.ConnectionState -eq 'Connected' -and $_.ifAlias -notmatch 'loopback|tunnel'} "
+                    + "|Select-Object -ExpandProperty ifAlias -Unique); "
+                    + "$r=0;$s=0;foreach($n in $names){$x=Get-NetAdapterStatistics -Name $n "
+                    + "-ErrorAction SilentlyContinue;if($x){$r+=[int64]$x.ReceivedBytes;$s+=[int64]$x.SentBytes}};"
+                    + "if($names.Count -gt 0){$r;$s}";
             process = new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
                     .redirectErrorStream(true).start();
-            if (!process.waitFor(1200, TimeUnit.MILLISECONDS)) { process.destroyForcibly(); return null; }
+            if (!process.waitFor(1200, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                return readWindowsNetstatCounters();
+            }
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 long[] values = reader.lines().map(String::strip).filter(s -> s.matches("\\d+"))
                         .mapToLong(Long::parseLong).toArray();
-                return values.length >= 2 ? new long[]{values[0], values[1]} : null;
+                return values.length >= 2 ? new long[]{values[0], values[1]} : readWindowsNetstatCounters();
             }
         } catch (Exception ignored) {
             if (process != null) process.destroyForcibly();
-            return null;
+            return readWindowsNetstatCounters();
         }
+    }
+
+    /**
+     * The NetTCPIP PowerShell cmdlets can require elevated WMI permissions on
+     * locked-down Windows machines. netstat -e is a non-elevated Windows API
+     * view of the real cumulative interface counters and is used as fallback.
+     */
+    private long[] readWindowsNetstatCounters() {
+        Process process = null;
+        try {
+            process = new ProcessBuilder("netstat.exe", "-e")
+                    .redirectErrorStream(true).start();
+            if (!process.waitFor(1200, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                return null;
+            }
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                for (String line; (line = reader.readLine()) != null; ) {
+                    String[] columns = line.strip().split("\\s+");
+                    if (columns.length >= 3 && columns[0].equalsIgnoreCase("Bytes")
+                            && columns[1].matches("\\d+") && columns[2].matches("\\d+")) {
+                        return new long[]{Long.parseLong(columns[1]), Long.parseLong(columns[2])};
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            if (process != null) process.destroyForcibly();
+        }
+        return null;
     }
 
     private long[] readProcNetworkCounters() {
