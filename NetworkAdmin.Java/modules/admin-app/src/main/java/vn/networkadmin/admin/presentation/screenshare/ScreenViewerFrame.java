@@ -116,7 +116,11 @@ public final class ScreenViewerFrame extends JFrame {
 
     private void send(ControlInputEvent.Kind kind, int viewX, int viewY, int button, int keyCode, int wheel) {
         if (!remoteControl.state(sessionId).status().equals("Granted")) return;
-        Point normalized = canvas.normalized(viewX, viewY);
+        boolean pointerEvent = kind == ControlInputEvent.Kind.MOVE
+                || kind == ControlInputEvent.Kind.BUTTON_DOWN
+                || kind == ControlInputEvent.Kind.BUTTON_UP
+                || kind == ControlInputEvent.Kind.WHEEL;
+        Point normalized = pointerEvent ? canvas.normalized(viewX, viewY) : new Point(0, 0);
         if (normalized == null) return;
         try { remoteControl.sendInput(sessionId, new ControlInputEvent(kind,
                 normalized.x / 1_000_000d, normalized.y / 1_000_000d, button, keyCode, 0, wheel)); }
