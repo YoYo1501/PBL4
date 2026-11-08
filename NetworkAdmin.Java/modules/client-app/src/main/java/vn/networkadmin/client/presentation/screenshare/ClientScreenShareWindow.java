@@ -6,14 +6,17 @@ import vn.networkadmin.client.application.remotecontrol.RemoteControlClientView;
 import vn.networkadmin.client.application.screenshare.ScreenShareClientView;
 import vn.networkadmin.client.infrastructure.monitoring.ClientTelemetrySampler;
 import vn.networkadmin.client.infrastructure.monitoring.NetworkTrafficHistory;
+import vn.networkadmin.network.domain.NetworkInterfaceInfo;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.geom.Path2D;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -41,6 +44,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
     private static final Color BORDER = new Color(218, 229, 244);
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault());
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("EEE, MMM d, yyyy", Locale.ENGLISH).withZone(ZoneId.systemDefault());
+    private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
 
     private final JFrame frame;
     private final String serverEndpoint;
@@ -89,6 +93,12 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
     private final ClientTelemetrySampler telemetry = new ClientTelemetrySampler();
     private final CardLayout contentLayout = new CardLayout();
     private final JPanel content = new JPanel(contentLayout);
+    private final DefaultListModel<String> logModel = new DefaultListModel<>();
+    private final JLabel logEmptyLabel = label("No log entries yet", 14, SECONDARY, false);
+    private JList<String> logList;
+    private JPanel networkInfoRows;
+    private JLabel networkInfoStatus;
+    private JPanel settingsRows;
     private JPanel dashboard;
     private ResponsiveGrid statusCards;
     private ResponsiveGrid remoteAdministrationGrid;
@@ -96,6 +106,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
     private ResponsiveGrid details;
     private volatile Runnable stopAction = () -> { };
     private volatile Runnable revokeAction = () -> { };
+    private volatile Runnable disconnectAction = () -> { };
     private volatile Consumer<String> chatSender = ignored -> { };
     private volatile boolean activelySharing;
     private volatile boolean activelyControlled;
@@ -116,8 +127,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
         frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent event) {
-                if (activelySharing || activelyControlled) { frame.setVisible(true); frame.toFront(); }
-                else close();
+                close();
             }
         });
         frame.setMinimumSize(new Dimension(1080, 680));
@@ -146,6 +156,9 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
         telemetryWorkers = Executors.newSingleThreadScheduledExecutor(task -> daemon(task, "client-dashboard-telemetry"));
         chatWorkers = Executors.newSingleThreadExecutor(task -> daemon(task, "client-chat-sender"));
         telemetryWorkers.scheduleWithFixedDelay(this::sampleTelemetry, 0, 1, TimeUnit.SECONDS);
+        telemetryWorkers.scheduleWithFixedDelay(this::refreshNetworkInfoPage, 15, 15, TimeUnit.SECONDS);
+        logEvent("Client dashboard started");
+        refreshNetworkInfoPage();
     }
 
     private static Thread daemon(Runnable task, String name) { Thread thread = new Thread(task, name); thread.setDaemon(true); return thread; }
@@ -155,9 +168,9 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
         JPanel workspace = new JPanel(new BorderLayout()); workspace.setBackground(BACKGROUND);
         content.add(buildDashboard(), "dashboard");
         content.add(chatPage(), "chat");
-        content.add(simplePage("Network Info", "Network information is read directly from active IPv4 interfaces."), "network");
-        content.add(simplePage("Logs", "Client logs will appear here when the logging service is enabled."), "logs");
-        content.add(simplePage("Settings", "Connection settings are read from environment variables and startup arguments."), "settings");
+        content.add(buildNetworkInfoPage(), "network");
+        content.add(buildLogsPage(), "logs");
+        content.add(buildSettingsPage(), "settings");
         content.add(simplePage("About", "NetworkAdmin Client · Java 21 · Swing"), "about");
         workspace.add(buildHeader(), BorderLayout.NORTH); workspace.add(content, BorderLayout.CENTER); root.add(workspace, BorderLayout.CENTER); return root;
     }
@@ -309,6 +322,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
     }
     @Override public void showCountdown(String command, int seconds, Runnable cancel) {
         cancelRemoteAction = Objects.requireNonNull(cancel);
+        logEvent("Remote administration pending: " + safe(command));
         onEdt(() -> {
             if (remoteCountdown != null) remoteCountdown.stop();
             final int[] remaining = {Math.max(1, seconds)};
@@ -337,6 +351,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
         });
     }
     @Override public void clearCountdown(String status) {
+        logEvent("Remote administration cleared" + (status == null || status.isBlank() ? "" : ": " + status));
         onEdt(() -> {
             if (remoteCountdown != null) { remoteCountdown.stop(); remoteCountdown = null; }
             remoteAdministrationState.setText("No pending operation");
@@ -376,7 +391,106 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
         JButton send = sendButton(); send.addActionListener(event -> sendChat(source)); row.add(source, BorderLayout.CENTER); row.add(send, BorderLayout.EAST); return row;
     }
 
-    private JPanel simplePage(String title, String description) { JPanel page = new JPanel(new BorderLayout()); page.setBackground(BACKGROUND); page.setBorder(new EmptyBorder(25, 27, 30, 29)); RoundedPanel card = card(CARD); card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS)); card.add(label(title, 24, TEXT, true)); card.add(Box.createVerticalStrut(12)); card.add(label(description, 15, SECONDARY, false)); page.add(card, BorderLayout.NORTH); return page; }
+    private JPanel simplePage(String title, String description) { return buildAboutPage(); }
+
+    private JPanel buildNetworkInfoPage() {
+        JPanel page = pageContainer();
+        RoundedPanel card = card(CARD); card.setLayout(new BorderLayout(0, 10));
+        card.add(sectionHeading(VectorIcon.Type.NETWORK, "Network Information", PRIMARY), BorderLayout.NORTH);
+        networkInfoStatus = label("Loading local network interfaces...", 12, SECONDARY, false);
+        card.add(networkInfoStatus, BorderLayout.SOUTH);
+        networkInfoRows = new JPanel(); networkInfoRows.setOpaque(false); networkInfoRows.setLayout(new BoxLayout(networkInfoRows, BoxLayout.Y_AXIS));
+        networkInfoRows.add(label("Loading local network interfaces...", 14, SECONDARY, false));
+        JScrollPane scroll = new JScrollPane(networkInfoRows); scroll.setBorder(null); scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER); scroll.getViewport().setBackground(CARD); scroll.getVerticalScrollBar().setUnitIncrement(14);
+        card.add(scroll, BorderLayout.CENTER); page.add(card, BorderLayout.CENTER); return page;
+    }
+
+    private JPanel buildLogsPage() {
+        JPanel page = pageContainer();
+        RoundedPanel card = card(CARD); card.setLayout(new BorderLayout(0, 10));
+        card.add(sectionHeading(VectorIcon.Type.LOGS, "Client Logs", PRIMARY), BorderLayout.NORTH);
+        logList = new JList<>(logModel); logList.setFont(new Font("Consolas", Font.PLAIN, 13)); logList.setForeground(TEXT); logList.setBackground(CARD); logList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION); logList.setBorder(new EmptyBorder(4, 4, 4, 4));
+        JScrollPane scroll = new JScrollPane(logList); scroll.setBorder(null); scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER); scroll.getViewport().setBackground(CARD); scroll.getVerticalScrollBar().setUnitIncrement(14);
+        JPanel body = new JPanel(new BorderLayout()); body.setOpaque(false); body.add(logEmptyLabel, BorderLayout.NORTH); body.add(scroll, BorderLayout.CENTER);
+        card.add(body, BorderLayout.CENTER); page.add(card, BorderLayout.CENTER); return page;
+    }
+
+    private JPanel buildSettingsPage() {
+        JPanel page = pageContainer();
+        RoundedPanel card = card(CARD); card.setLayout(new BorderLayout(0, 10));
+        card.add(sectionHeading(VectorIcon.Type.SETTINGS, "Client Settings", PRIMARY), BorderLayout.NORTH);
+        settingsRows = new JPanel(); settingsRows.setOpaque(false); settingsRows.setLayout(new BoxLayout(settingsRows, BoxLayout.Y_AXIS));
+        JScrollPane scroll = new JScrollPane(settingsRows); scroll.setBorder(null); scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER); scroll.getViewport().setBackground(CARD); scroll.getVerticalScrollBar().setUnitIncrement(14);
+        card.add(scroll, BorderLayout.CENTER); page.add(card, BorderLayout.CENTER); refreshSettingsPage(); return page;
+    }
+
+    private JPanel buildAboutPage() {
+        JPanel page = pageContainer();
+        RoundedPanel card = card(CARD); card.setLayout(new BorderLayout(0, 10));
+        card.add(sectionHeading(VectorIcon.Type.ABOUT, "About NetworkAdmin Client", PRIMARY), BorderLayout.NORTH);
+        JPanel rows = new JPanel(); rows.setOpaque(false); rows.setLayout(new BoxLayout(rows, BoxLayout.Y_AXIS));
+        addDataRow(rows, "Application", "NetworkAdmin Client"); addDataRow(rows, "Version", "v2.0");
+        addDataRow(rows, "Runtime", System.getProperty("java.version", "Unavailable") + " / Swing");
+        addDataRow(rows, "Operating system", System.getProperty("os.name", "Unavailable") + " " + System.getProperty("os.version", ""));
+        addDataRow(rows, "Architecture", System.getProperty("os.arch", "Unavailable")); addDataRow(rows, "Client identity", clientDisplayName);
+        card.add(rows, BorderLayout.CENTER); page.add(card, BorderLayout.CENTER); return page;
+    }
+
+    private JPanel pageContainer() { JPanel page = new JPanel(new BorderLayout()); page.setBackground(BACKGROUND); page.setBorder(new EmptyBorder(25, 27, 30, 29)); return page; }
+
+    private void refreshNetworkInfoPage() {
+        if (telemetryWorkers == null) return;
+        try {
+            telemetryWorkers.execute(() -> {
+                try { List<NetworkInterfaceInfo> interfaces = telemetry.networkInterfaces(); onEdt(() -> renderNetworkInterfaces(interfaces)); }
+                catch (RuntimeException error) { onEdt(() -> renderNetworkInfoError(error)); }
+            });
+        } catch (RuntimeException ignored) { }
+    }
+
+    private void renderNetworkInterfaces(List<NetworkInterfaceInfo> interfaces) {
+        if (networkInfoRows == null || networkInfoStatus == null) return;
+        networkInfoRows.removeAll();
+        if (interfaces == null || interfaces.isEmpty()) networkInfoRows.add(label("No local IPv4 network interfaces were detected.", 14, SECONDARY, false));
+        else for (NetworkInterfaceInfo info : interfaces) networkInfoRows.add(networkInterfaceCard(info));
+        networkInfoStatus.setText("Updated " + LOG_TIME.format(Instant.now()) + " - " + (interfaces == null ? 0 : interfaces.size()) + " interface(s)");
+        networkInfoRows.revalidate(); networkInfoRows.repaint();
+    }
+
+    private void renderNetworkInfoError(RuntimeException error) {
+        if (networkInfoRows == null || networkInfoStatus == null) return;
+        networkInfoRows.removeAll(); networkInfoRows.add(label("Unable to read local network interfaces: " + safe(error.getMessage()), 14, DANGER, false));
+        networkInfoStatus.setText("Network inventory unavailable"); networkInfoRows.revalidate(); networkInfoRows.repaint();
+    }
+
+    private JPanel networkInterfaceCard(NetworkInterfaceInfo info) {
+        RoundedPanel panel = card(new Color(248, 251, 255)); panel.setLayout(new BorderLayout(0, 5));
+        JPanel title = new JPanel(new BorderLayout(8, 0)); title.setOpaque(false);
+        title.add(label(safe(info.name()), 15, TEXT, true), BorderLayout.WEST);
+        title.add(label(info.virtual() ? "Virtual interface" : "Physical interface", 12, info.virtual() ? SECONDARY : SUCCESS, false), BorderLayout.EAST);
+        panel.add(title, BorderLayout.NORTH);
+        JPanel values = new JPanel(new GridLayout(0, 2, 16, 3)); values.setOpaque(false);
+        addNetworkValue(values, "Description", info.description()); addNetworkValue(values, "IPv4 address", info.ipAddress()); addNetworkValue(values, "MAC address", info.macAddress()); addNetworkValue(values, "Gateway", info.gateway()); addNetworkValue(values, "Subnet", info.subnet());
+        panel.add(values, BorderLayout.CENTER); panel.setAlignmentX(Component.LEFT_ALIGNMENT); panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 118)); return panel;
+    }
+
+    private void addNetworkValue(JPanel parent, String name, String value) { JPanel row = new JPanel(new BorderLayout(8, 0)); row.setOpaque(false); row.add(label(name, 12, SECONDARY, false), BorderLayout.WEST); JLabel actual = label(safe(value), 12, TEXT, true); actual.setHorizontalAlignment(SwingConstants.RIGHT); row.add(actual, BorderLayout.CENTER); parent.add(row); }
+
+    private void refreshSettingsPage() {
+        if (settingsRows == null) return;
+        settingsRows.removeAll(); addDataRow(settingsRows, "Server endpoint", serverEndpoint); addDataRow(settingsRows, "Transport", "TLS");
+        addDataRow(settingsRows, "Connection", connectedToAdmin ? "Connected to Admin" : "Disconnected from Admin"); addDataRow(settingsRows, "Session", sessionValue.getText());
+        addDataRow(settingsRows, "Client identity", clientDisplayName); addDataRow(settingsRows, "Telemetry sampling", "1 second"); addDataRow(settingsRows, "Runtime", System.getProperty("java.version", "Unavailable"));
+        settingsRows.revalidate(); settingsRows.repaint();
+    }
+
+    private void addDataRow(JPanel parent, String name, String value) {
+        JPanel row = new JPanel(new BorderLayout(16, 0)); row.setOpaque(false); row.setBorder(new EmptyBorder(8, 4, 8, 4));
+        row.add(label(name, 14, SECONDARY, false), BorderLayout.WEST); JLabel actual = label(safe(value), 14, TEXT, true); actual.setHorizontalAlignment(SwingConstants.RIGHT); row.add(actual, BorderLayout.CENTER);
+        JSeparator separator = new JSeparator(); separator.setForeground(BORDER); JPanel wrapper = new JPanel(new BorderLayout()); wrapper.setOpaque(false); wrapper.add(row, BorderLayout.CENTER); wrapper.add(separator, BorderLayout.SOUTH); wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, 42)); parent.add(wrapper);
+    }
+
+    private static String safe(String value) { return value == null || value.isBlank() ? "Unavailable" : value; }
 
     private void addInfoRow(JPanel panel, VectorIcon.Type icon, String name, JLabel value, boolean separatorBefore) {
         if (separatorBefore) {
@@ -389,7 +503,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
 
     private JPanel ringColumn(MetricRing ring, VectorIcon.Type icon, String title) { JPanel panel = new JPanel(new BorderLayout(0, 3)); panel.setOpaque(false); panel.add(ring, BorderLayout.CENTER); JPanel caption = new JPanel(new FlowLayout(FlowLayout.CENTER, 4, 0)); caption.setOpaque(false); caption.add(iconLabel(icon, 15, TEXT)); caption.add(label(title, 13, TEXT, true)); panel.add(caption, BorderLayout.SOUTH); return panel; }
 
-    private JPanel sectionHeading(VectorIcon.Type icon, String text, Color color) { JPanel panel = new JPanel(new BorderLayout(10, 0)); panel.setOpaque(false); panel.setBorder(new EmptyBorder(1, 2, 0, 2)); panel.add(iconLabel(icon, 26, color), BorderLayout.WEST); panel.add(label(text, 19, TEXT, true), BorderLayout.CENTER); if (text.equals("Network Traffic")) { JComboBox<String> range = new JComboBox<>(new String[]{"Real-time"}); range.setEnabled(false); range.setFont(new Font("Segoe UI", Font.PLAIN, 12)); range.setBorder(BorderFactory.createLineBorder(BORDER)); panel.add(range, BorderLayout.EAST); } return panel; }
+    private JPanel sectionHeading(VectorIcon.Type icon, String text, Color color) { JPanel panel = new JPanel(new BorderLayout(10, 0)); panel.setOpaque(false); panel.setBorder(new EmptyBorder(1, 2, 0, 2)); panel.add(iconLabel(icon, 26, color), BorderLayout.WEST); panel.add(label(text, 19, TEXT, true), BorderLayout.CENTER); if (text.equals("Network Traffic")) { JLabel realtime = label("Real-time", 12, SECONDARY, true); realtime.setOpaque(true); realtime.setBackground(CARD); realtime.setBorder(new RoundedLineBorder(BORDER, 8)); realtime.setHorizontalAlignment(SwingConstants.CENTER); realtime.setPreferredSize(new Dimension(82, 30)); panel.add(realtime, BorderLayout.EAST); } return panel; }
     private JPanel coloredLegend(String prefix, JLabel value, Color color) { JPanel panel = new JPanel(new FlowLayout(FlowLayout.CENTER, 4, 0)); panel.setOpaque(false); panel.add(iconLabel(VectorIcon.Type.DOT, 11, color)); panel.add(label(prefix, 13, TEXT, false)); panel.add(value); return panel; }
     private JPanel vertical(String title, JLabel state, JLabel detail) { JPanel body = new JPanel(); body.setOpaque(false); body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS)); body.add(label(title, 13, TEXT, true)); body.add(Box.createVerticalStrut(2)); body.add(state); body.add(detail); return body; }
     private RoundedPanel card(Color fill) { RoundedPanel panel = new RoundedPanel(fill); panel.setBorder(new EmptyBorder(10, 14, 10, 14)); return panel; }
@@ -508,29 +622,65 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
     }
 
     private void sampleTelemetry() { try { ClientTelemetrySampler.TelemetrySnapshot value = telemetry.sample(); SwingUtilities.invokeLater(() -> applyTelemetry(value)); } catch (RuntimeException error) { System.getLogger(getClass().getName()).log(System.Logger.Level.DEBUG, "Client telemetry sample failed", error); onEdt(() -> applyNetworkValues(0, 0)); } }
-    private void applyTelemetry(ClientTelemetrySampler.TelemetrySnapshot value) { if (!SwingUtilities.isEventDispatchThread()) { SwingUtilities.invokeLater(() -> applyTelemetry(value)); return; } double cpu = clamp(value.cpuPercent()), ram = clamp(value.ramPercent()), disk = clamp(value.diskPercent()); applyNetworkValues(value.downloadMbps(), value.uploadMbps()); cpuRing.setValue(cpu); ramRing.setValue(ram); diskRing.setValue(disk); performanceChart.addPoint(cpu, ram); machineName.setText(value.machineName()); osName.setText(value.operatingSystem()); cpuModel.setText(value.cpuModel()); memory.setText(formatMemory(value.usedMemoryBytes(), value.totalMemoryBytes())); resolution.setText(value.screenResolution()); ipAddress.setText(value.ipAddress()); macAddress.setText(value.macAddress()); topClock.setText(TIME.format(value.sampledAt())); topDate.setText(DATE.format(value.sampledAt())); }
+    private void applyTelemetry(ClientTelemetrySampler.TelemetrySnapshot value) { if (!SwingUtilities.isEventDispatchThread()) { SwingUtilities.invokeLater(() -> applyTelemetry(value)); return; } double cpu = clamp(value.cpuPercent()), ram = clamp(value.ramPercent()), disk = clamp(value.diskPercent()); applyNetworkValues(value.downloadMbps(), value.uploadMbps()); cpuRing.setValue(cpu); ramRing.setValue(ram); diskRing.setValue(disk); performanceChart.addPoint(cpu, ram); machineName.setText(value.machineName()); osName.setText(value.operatingSystem()); cpuModel.setText(value.cpuModel()); memory.setText(formatMemory(value.usedMemoryBytes(), value.totalMemoryBytes())); resolution.setText(value.screenResolution()); ipAddress.setText(value.ipAddress()); macAddress.setText(value.macAddress()); topClock.setText(TIME.format(value.sampledAt())); topDate.setText(DATE.format(value.sampledAt())); refreshSettingsPage(); }
     private void applyNetworkValues(double downloadMbps, double uploadMbps) { double safeDownload = nonNegative(downloadMbps), safeUpload = nonNegative(uploadMbps); downloadValue.setText(String.format(Locale.ROOT, "%.2f Mbps", safeDownload)); uploadValue.setText(String.format(Locale.ROOT, "%.2f Mbps", safeUpload)); networkChart.addPoint(safeDownload, safeUpload); }
     private static String formatMemory(long used, long total) { return total <= 0 ? "Unavailable" : String.format(Locale.ROOT, "%.1f / %.1f GB", used / 1_073_741_824.0, total / 1_073_741_824.0); }
     private static double clamp(double value) { return !Double.isFinite(value) ? 0 : Math.max(0, Math.min(100, value)); }
     private static double nonNegative(double value) { return !Double.isFinite(value) ? 0 : Math.max(0, value); }
 
+    private void logEvent(String message) {
+        if (message == null || message.isBlank()) return;
+        onEdt(() -> {
+            logModel.addElement(LOG_TIME.format(Instant.now()) + "  " + message);
+            while (logModel.size() > 250) logModel.remove(0);
+            logEmptyLabel.setVisible(logModel.isEmpty());
+            if (logList != null && logModel.size() > 0) logList.ensureIndexIsVisible(logModel.size() - 1);
+        });
+    }
+
     @Override public CompletionStage<Boolean> requestConsent(String adminName) { return confirm("Screen sharing request", "Admin is requesting to view your screen. Capturing starts only after you accept.", "Accept"); }
     @Override public CompletionStage<Boolean> requestControlConsent(String adminName) { return confirm("Remote control request", "Admin requests mouse and keyboard control. You can revoke access at any time.", "Allow Control"); }
     private CompletionStage<Boolean> confirm(String title, String prompt, String accept) { if (GraphicsEnvironment.isHeadless()) return CompletableFuture.completedFuture(false); CompletableFuture<Boolean> result = new CompletableFuture<>(); SwingUtilities.invokeLater(() -> { frame.setVisible(true); frame.setExtendedState(JFrame.NORMAL); frame.toFront(); Object[] options = {accept, "Reject"}; int choice = JOptionPane.showOptionDialog(frame, prompt, title, JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE, null, options, options[1]); result.complete(choice == 0); }); return result; }
 
-    @Override public void sharingStarted(Runnable action) { stopAction = Objects.requireNonNull(action); activelySharing = true; onEdt(() -> { sharingState.setText("Active"); sharingState.setForeground(SUCCESS); sharingDetail.setText("Screen is being viewed by Admin"); stop.setEnabled(true); stop.setVisible(connectedToAdmin); frame.setVisible(true); }); }
-    @Override public void sharingStopped(String reason) { stopAction = () -> { }; activelySharing = false; onEdt(() -> { sharingState.setText("Inactive"); sharingState.setForeground(SECONDARY); sharingDetail.setText(reason == null || reason.isBlank() ? "Screen sharing is not active" : reason); stop.setEnabled(false); stop.setVisible(false); }); }
-    @Override public void controlStarted(Runnable action) { revokeAction = Objects.requireNonNull(action); activelyControlled = true; onEdt(() -> { controlState.setText("Allowed"); controlState.setForeground(SUCCESS); controlDetail.setText("Admin is controlling this computer"); revoke.setEnabled(true); revoke.setVisible(connectedToAdmin); frame.setVisible(true); frame.toFront(); }); }
-    @Override public void controlStopped(String reason) { revokeAction = () -> { }; activelyControlled = false; onEdt(() -> { controlState.setText("Not allowed"); controlState.setForeground(SECONDARY); controlDetail.setText(reason == null || reason.isBlank() ? "No remote control access" : reason); revoke.setEnabled(false); revoke.setVisible(false); }); }
-    @Override public void connectionChanged(boolean connected) { connectedToAdmin = connected; onEdt(() -> { connectionLabel.setText(connected ? "Connected to Admin" : "Disconnected from Admin"); sidebarConnection.setText(connected ? "Connected to Admin" : "Disconnected from Admin"); sidebarConnection.setIcon(new VectorIcon(VectorIcon.Type.DOT, 11, connected ? SUCCESS : DANGER)); connectionPill.setText(connected ? "Connected" : "Disconnected"); connectionPill.setIcon(new VectorIcon(VectorIcon.Type.DOT, 10, connected ? SUCCESS : DANGER)); connectionPill.setForeground(connected ? SUCCESS : DANGER); clientState.setText(connected ? "Online" : "Offline"); clientState.setForeground(connected ? SUCCESS : DANGER); clientDetail.setText(connected ? "Connected to Admin" : "Waiting for connection to Admin"); stop.setVisible(connected && activelySharing); revoke.setVisible(connected && activelyControlled); if (!connected) cancelRemoteAdministration.setVisible(false); }); }
-    @Override public void connectionFailed(String reason) { connectedToAdmin = false; onEdt(() -> { connectionPill.setText("Reconnecting"); connectionPill.setIcon(new VectorIcon(VectorIcon.Type.DOT, 10, WARNING)); connectionPill.setForeground(WARNING); connectionLabel.setText("Retrying connection"); clientDetail.setText(reason == null ? "Retrying connection" : reason); stop.setVisible(false); revoke.setVisible(false); cancelRemoteAdministration.setVisible(false); }); }
-    @Override public void clientIdentity(String name, String clientId) { clientDisplayName = name == null || name.isBlank() ? "NetworkAdmin Client" : name; }
+    @Override public void sharingStarted(Runnable action) { stopAction = Objects.requireNonNull(action); activelySharing = true; logEvent("Screen sharing started"); onEdt(() -> { sharingState.setText("Active"); sharingState.setForeground(SUCCESS); sharingDetail.setText("Screen is being viewed by Admin"); stop.setEnabled(true); stop.setVisible(connectedToAdmin); frame.setVisible(true); }); }
+    @Override public void sharingStopped(String reason) {
+        stopAction = () -> { };
+        activelySharing = false;
+        logEvent("Screen sharing stopped" + (reason == null || reason.isBlank() ? "" : ": " + reason));
+        revokeRemoteControlAfterSharingStops();
+        onEdt(() -> { sharingState.setText("Inactive"); sharingState.setForeground(SECONDARY); sharingDetail.setText(reason == null || reason.isBlank() ? "Screen sharing is not active" : reason); stop.setEnabled(false); stop.setVisible(false); });
+    }
+    private void revokeRemoteControlAfterSharingStops() {
+        if (!activelyControlled) return;
+        Runnable action = revokeAction;
+        revokeAction = () -> { };
+        try { action.run(); }
+        catch (RuntimeException error) { System.getLogger(getClass().getName()).log(System.Logger.Level.DEBUG, "Could not revoke remote control after screen sharing stopped.", error); }
+    }
+    @Override public void controlStarted(Runnable action) { revokeAction = Objects.requireNonNull(action); activelyControlled = true; logEvent("Remote control enabled"); onEdt(() -> { controlState.setText("Allowed"); controlState.setForeground(SUCCESS); controlDetail.setText("Admin is controlling this computer"); revoke.setEnabled(true); revoke.setVisible(connectedToAdmin); frame.setVisible(true); frame.toFront(); }); }
+    @Override public void controlStopped(String reason) { revokeAction = () -> { }; activelyControlled = false; logEvent("Remote control stopped" + (reason == null || reason.isBlank() ? "" : ": " + reason)); onEdt(() -> { controlState.setText("Not allowed"); controlState.setForeground(SECONDARY); controlDetail.setText(reason == null || reason.isBlank() ? "No remote control access" : reason); revoke.setEnabled(false); revoke.setVisible(false); }); }
+    @Override public void connectionChanged(boolean connected) { boolean changed = connectedToAdmin != connected; connectedToAdmin = connected; if (changed) logEvent(connected ? "Connected to Admin" : "Disconnected from Admin"); onEdt(() -> { connectionLabel.setText(connected ? "Connected to Admin" : "Disconnected from Admin"); sidebarConnection.setText(connected ? "Connected to Admin" : "Disconnected from Admin"); sidebarConnection.setIcon(new VectorIcon(VectorIcon.Type.DOT, 11, connected ? SUCCESS : DANGER)); connectionPill.setText(connected ? "Connected" : "Disconnected"); connectionPill.setIcon(new VectorIcon(VectorIcon.Type.DOT, 10, connected ? SUCCESS : DANGER)); connectionPill.setForeground(connected ? SUCCESS : DANGER); clientState.setText(connected ? "Online" : "Offline"); clientState.setForeground(connected ? SUCCESS : DANGER); clientDetail.setText(connected ? "Connected to Admin" : "Waiting for connection to Admin"); stop.setVisible(connected && activelySharing); revoke.setVisible(connected && activelyControlled); if (!connected) cancelRemoteAdministration.setVisible(false); refreshSettingsPage(); }); }
+    @Override public void connectionFailed(String reason) { connectedToAdmin = false; logEvent("Connection retry" + (reason == null || reason.isBlank() ? "" : ": " + reason)); onEdt(() -> { connectionPill.setText("Reconnecting"); connectionPill.setIcon(new VectorIcon(VectorIcon.Type.DOT, 10, WARNING)); connectionPill.setForeground(WARNING); connectionLabel.setText("Retrying connection"); clientDetail.setText(reason == null ? "Retrying connection" : reason); stop.setVisible(false); revoke.setVisible(false); cancelRemoteAdministration.setVisible(false); refreshSettingsPage(); }); }
+    @Override public void clientIdentity(String name, String clientId) { clientDisplayName = name == null || name.isBlank() ? "NetworkAdmin Client" : name; onEdt(this::refreshSettingsPage); }
     @Override public void sessionChanged(String sessionId) { onEdt(() -> { String value = sessionId == null || sessionId.isBlank() ? "—" : sessionId; sessionValue.setText(value); topSession.setText(value); sidebarSession.setText("<html><body style='width:190px'>Session: " + value + "</body></html>"); sidebarSession.setToolTipText("Session: " + value); sessionDetail.setText(value.equals("—") ? "No active connection session" : "Active"); }); }
 
     public void setChatSender(Consumer<String> action) { chatSender = Objects.requireNonNull(action); }
-    public void chatReceived(ClientChatUseCases.ChatMessage message) { if (message != null) onEdt(() -> { chatTranscript.addMessage(message); chatPageTranscript.addMessage(message); }); }
-    private void sendChat(JTextField source) { String value = source.getText(); if (value == null || value.isBlank()) return; source.setText(""); chatWorkers.execute(() -> { try { chatSender.accept(value.strip()); } catch (RuntimeException error) { onEdt(() -> JOptionPane.showMessageDialog(frame, error.getMessage(), "Chat error", JOptionPane.WARNING_MESSAGE)); } }); }
+    public void setDisconnectAction(Runnable action) { disconnectAction = Objects.requireNonNull(action); }
+    public void chatReceived(ClientChatUseCases.ChatMessage message) {
+        if (message == null) return;
+        boolean fromAdmin = "Admin".equalsIgnoreCase(message.sender());
+        String participant = fromAdmin ? "Admin" : clientDisplayName;
+        ClientChatUseCases.ChatMessage privateMessage = new ClientChatUseCases.ChatMessage(message.messageId(), participant, message.text(), message.sentAt());
+        logEvent("Chat message " + (fromAdmin ? "received from Admin" : "sent by " + clientDisplayName));
+        onEdt(() -> { chatTranscript.addMessage(privateMessage); chatPageTranscript.addMessage(privateMessage); });
+    }
+    private void sendChat(JTextField source) { String value = source.getText(); if (value == null || value.isBlank()) return; source.setText(""); chatWorkers.execute(() -> { try { chatSender.accept(value.strip()); logEvent("Chat message sent to Admin"); } catch (RuntimeException error) { logEvent("Chat message failed" + (error.getMessage() == null ? "" : ": " + error.getMessage())); onEdt(() -> JOptionPane.showMessageDialog(frame, error.getMessage(), "Chat error", JOptionPane.WARNING_MESSAGE)); } }); }
     @Override public void close() {
+        Runnable disconnect = disconnectAction;
+        disconnectAction = () -> { };
+        try { disconnect.run(); }
+        catch (RuntimeException error) { System.getLogger(getClass().getName()).log(System.Logger.Level.DEBUG, "Could not close the Client connection cleanly.", error); }
+        connectedToAdmin = false;
         if (telemetryWorkers != null) telemetryWorkers.shutdownNow();
         if (chatWorkers != null) chatWorkers.shutdownNow();
         onEdt(() -> {
@@ -679,19 +829,35 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
         void addMessage(ClientChatUseCases.ChatMessage message) {
             empty.setVisible(false);
             if (empty.getParent() == this) remove(empty);
-            boolean outgoing = !"Admin".equalsIgnoreCase(message.sender());
-            JPanel line = new JPanel(new BorderLayout());
+            String senderName = message.sender() == null || message.sender().isBlank() ? "Unknown" : message.sender();
+            boolean outgoing = !"Admin".equalsIgnoreCase(senderName);
+            JPanel line = new JPanel(new FlowLayout(outgoing ? FlowLayout.RIGHT : FlowLayout.LEFT, 4, 5));
             line.setOpaque(false);
-            line.setBorder(new EmptyBorder(5, 4, 5, 4));
+            JPanel messageBlock = new JPanel(new BorderLayout(0, 2));
+            messageBlock.setOpaque(false);
             Bubble bubble = new Bubble(outgoing ? new Color(214, 231, 255) : new Color(241, 243, 248));
             bubble.setLayout(new BoxLayout(bubble, BoxLayout.Y_AXIS));
-            JLabel text = label("<html><body style='width:260px'>" + escapeHtml(message.text()) + "</body></html>", 13, TEXT, false);
+            JTextArea text = new JTextArea(message.text() == null ? "" : message.text());
+            text.setFont(new Font("Segoe UI", Font.PLAIN, 13));
+            text.setForeground(TEXT);
+            text.setOpaque(false);
+            text.setEditable(false);
+            text.setFocusable(false);
+            text.setLineWrap(true);
+            text.setWrapStyleWord(true);
             text.setBorder(new EmptyBorder(2, 4, 2, 4));
+            FontMetrics messageMetrics = text.getFontMetrics(text.getFont());
+            int messageWidth = Math.min(360, Math.max(48, messageMetrics.stringWidth(longestLine(message.text())) + 16));
+            text.setPreferredSize(new Dimension(messageWidth, wrappedMessageHeight(message.text(), messageMetrics, messageWidth - 8)));
             JLabel stamp = label(TIME.format(message.sentAt()) + (outgoing ? " · Sent" : ""), 10, SECONDARY, false);
             stamp.setAlignmentX(outgoing ? RIGHT_ALIGNMENT : LEFT_ALIGNMENT);
             bubble.add(text);
             bubble.add(stamp);
-            line.add(bubble, outgoing ? BorderLayout.EAST : BorderLayout.WEST);
+            JLabel sender = label(senderName, 11, SECONDARY, true);
+            sender.setHorizontalAlignment(outgoing ? SwingConstants.RIGHT : SwingConstants.LEFT);
+            messageBlock.add(sender, BorderLayout.NORTH);
+            messageBlock.add(bubble, BorderLayout.CENTER);
+            line.add(messageBlock);
             rows.add(line);
             revalidate();
             rows.revalidate();
@@ -699,6 +865,8 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
             JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
             if (scroll != null) SwingUtilities.invokeLater(() -> scroll.getVerticalScrollBar().setValue(scroll.getVerticalScrollBar().getMaximum()));
         }
+        private static String longestLine(String value) { if (value == null || value.isEmpty()) return ""; String longest = ""; for (String line : value.split("\\R", -1)) if (line.length() > longest.length()) longest = line; return longest; }
+        private static int wrappedMessageHeight(String value, FontMetrics metrics, int width) { int lines = 0; for (String line : (value == null ? "" : value).split("\\R", -1)) lines += Math.max(1, (int) Math.ceil(metrics.stringWidth(line) / (double) Math.max(1, width))); return lines * metrics.getHeight() + 4; }
         private static String escapeHtml(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>"); }
     }
     private static final class Bubble extends JPanel { private final Color fill; private Bubble(Color fill) { this.fill = fill; setOpaque(false); setBorder(new EmptyBorder(6, 10, 6, 10)); } @Override protected void paintComponent(Graphics graphics) { Graphics2D g = (Graphics2D) graphics.create(); g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON); g.setColor(fill); g.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 15, 15); g.dispose(); super.paintComponent(graphics); } }

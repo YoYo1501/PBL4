@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.nio.file.FileStore;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +53,11 @@ public final class ClientTelemetrySampler {
                 totalMemory, Math.max(0, totalMemory - freeMemory), machineName(), operatingSystemName(),
                 cachedCpuModel(), cachedScreenResolution(), primary.map(NetworkInterfaceInfo::ipAddress).orElse("Unavailable"),
                 primary.map(NetworkInterfaceInfo::macAddress).orElse("Unavailable"), Instant.now());
+    }
+
+    /** Returns the current local interface inventory for the Client Network Info page. */
+    public List<NetworkInterfaceInfo> networkInterfaces() {
+        return inventory.interfaces();
     }
 
     private double diskUsage() {

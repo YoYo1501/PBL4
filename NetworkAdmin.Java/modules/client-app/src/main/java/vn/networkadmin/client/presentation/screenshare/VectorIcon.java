@@ -46,7 +46,7 @@ public final class VectorIcon implements Icon {
             case RESOLUTION -> { c.round(s*.12f,s*.18f,s*.76f,s*.55f,s*.08f); c.line(s*.5f,s*.73f,s*.5f,s*.85f); c.line(s*.32f,s*.86f,s*.68f,s*.86f); }
             case WIFI -> { c.arc(s*.15f,s*.2f,s*.7f,s*.52f,35,110); c.arc(s*.29f,s*.37f,s*.42f,s*.31f,35,110); c.fillOval(s*.46f,s*.7f,s*.08f,s*.08f); }
             case MAC -> { c.round(s*.18f,s*.25f,s*.64f,s*.5f,s*.08f); c.line(s*.3f,s*.25f,s*.3f,s*.75f); c.line(s*.5f,s*.25f,s*.5f,s*.75f); c.line(s*.7f,s*.25f,s*.7f,s*.75f); }
-            case SEND -> { c.fillRound(s*.12f,s*.2f,s*.76f,s*.6f,s*.13f); g.setColor(Color.WHITE); c.line(s*.28f,s*.5f,s*.72f,s*.5f); c.line(s*.57f,s*.35f,s*.72f,s*.5f); c.line(s*.57f,s*.65f,s*.72f,s*.5f); }
+            case SEND -> { c.line(s*.12f,s*.5f,s*.84f,s*.14f); c.line(s*.84f,s*.14f,s*.6f,s*.86f); c.line(s*.6f,s*.86f,s*.45f,s*.57f); c.line(s*.45f,s*.57f,s*.12f,s*.5f); c.line(s*.45f,s*.57f,s*.84f,s*.14f); }
             case STOP -> c.fillRect(s*.23f,s*.23f,s*.54f,s*.54f);
             case LOCK -> { c.round(s*.23f,s*.43f,s*.54f,s*.4f,s*.05f); c.arc(s*.34f,s*.16f,s*.32f,s*.45f,0,180); c.line(s*.5f,s*.58f,s*.5f,s*.68f); }
             case REVOKE -> { c.oval(s*.16f,s*.16f,s*.68f,s*.68f); c.line(s*.3f,s*.5f,s*.7f,s*.5f); }

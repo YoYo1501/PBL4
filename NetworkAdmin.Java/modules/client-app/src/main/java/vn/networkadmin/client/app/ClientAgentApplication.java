@@ -28,13 +28,17 @@ public final class ClientAgentApplication {
         ClientDependencyConfig dependencies = new ClientDependencyConfig(host, port, fingerprint,
                 ClientAgentRuntime.localClientId(), clientName, screenShareWindow, screenShareWindow, screenShareWindow,
                 screenShareWindow::chatReceived, screenShareWindow::setChatSender);
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        CountDownLatch stopped = new CountDownLatch(1);
+        screenShareWindow.setDisconnectAction(() -> {
             dependencies.close();
+            stopped.countDown();
+        });
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             screenShareWindow.close();
         }, "network-admin-client-shutdown"));
         dependencies.runtime().start();
         System.out.printf("NetworkAdmin Client started; connecting to %s:%d. Press Ctrl+C to stop.%n", host, port);
-        new CountDownLatch(1).await();
+        stopped.await();
     }
 
     private static String setting(String[] args, String name, String environment, String fallback) {
