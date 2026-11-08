@@ -25,7 +25,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
     private final JButton cancelRemoteAdministration = new JButton("Cancel pending operation");
     private final JButton stop = new JButton("Stop Sharing");
     private final JButton revoke = new JButton("Revoke Control");
-    private final JTextArea chat = new JTextArea();
+    private final JTextPane chat = new JTextPane();
     private final JTextField chatInput = new JTextField();
     private volatile Runnable stopAction = () -> { }, revokeAction = () -> { };
     private volatile Consumer<String> chatSender = ignored -> { };
@@ -54,7 +54,7 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
         cancelRemoteAdministration.setEnabled(false);
         cancelRemoteAdministration.addActionListener(event -> cancelRemoteAction.run());
         remotePanel.add(cancelRemoteAdministration, BorderLayout.EAST);
-        chat.setEditable(false); chat.setLineWrap(true); chat.setWrapStyleWord(true);
+        chat.setEditable(false);
         JPanel chatPanel = new JPanel(new BorderLayout(5, 5)); chatPanel.setBorder(BorderFactory.createTitledBorder("Chat with Admin"));
         chatPanel.add(new JScrollPane(chat), BorderLayout.CENTER);
         JButton send = new JButton("Send"); send.addActionListener(event -> sendChat()); chatInput.addActionListener(event -> sendChat());
@@ -145,8 +145,17 @@ public final class ClientScreenShareWindow implements ScreenShareClientView, Rem
     }
     public void setChatSender(Consumer<String> action) { chatSender = Objects.requireNonNull(action); }
     public void chatReceived(ClientChatUseCases.ChatMessage message) {
-        onEdt(() -> chat.append("[" + DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault()).format(message.sentAt())
-                + "] " + message.sender() + ": " + message.text() + "\n"));
+        onEdt(() -> appendChatMessage("[" + DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault()).format(message.sentAt())
+                + "] " + message.sender() + ": " + message.text() + "\n", message.sender().equalsIgnoreCase("Admin")));
+    }
+    private void appendChatMessage(String text, boolean incoming) {
+        javax.swing.text.StyledDocument document = chat.getStyledDocument();
+        javax.swing.text.Style style = chat.addStyle(incoming ? "incoming" : "outgoing", null);
+        javax.swing.text.StyleConstants.setForeground(style, incoming ? new Color(35, 110, 210) : UIManager.getColor("TextArea.foreground"));
+        try {
+            document.insertString(document.getLength(), text, style);
+            chat.setCaretPosition(document.getLength());
+        } catch (javax.swing.text.BadLocationException ignored) { }
     }
     private void sendChat() {
         String value = chatInput.getText(); if (value == null || value.isBlank()) return;
